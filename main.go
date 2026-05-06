@@ -5,14 +5,20 @@
 // resolve ourselves via Team Cymru DNS whois (free, public, no DB).
 //
 // Surface:
-//   GET /         text/plain IP for curl, HTML for browsers (Accept negotiation)
-//   GET /json     full JSON (ip, country, asn, asorg, vpn verdict, headers subset)
-//   GET /vpn      JSON: { vpn: bool, reasons: [...], provider?: "mullvad", ... }
-//   GET /headers  human header dump
-//   GET /all      plain-text full debug summary
-//   GET /ua       User-Agent only
-//   GET /reverse  reverse DNS PTR
-//   GET /health   "ok"
+//   GET /             text/plain IP for curl, HTML for browsers (Accept negotiation)
+//   GET /json         full JSON (ip, country, asn, asorg, vpn verdict, headers subset)
+//   GET /vpn          JSON: { vpn: bool, reasons: [...], provider?: "mullvad", ... }
+//   GET /trace        Cloudflare-style key=value plain text
+//   GET /headers      human header dump
+//   GET /all          plain-text full debug summary
+//   GET /ua           User-Agent only
+//   GET /reverse      reverse DNS PTR
+//   GET /health       "ok"
+//   GET /ip/{addr}    same as / but for an arbitrary IP (browser HTML or curl plain)
+//
+// Query params:
+//   ?ip=<addr>        on /, /json, /vpn, /trace, /all, /reverse — look up another IP
+//   ?format=yaml|hosts  on /json — alternate output formats
 package main
 
 import (
@@ -81,8 +87,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", srv.handleRoot)
+	mux.HandleFunc("GET /ip/{addr}", srv.handleRoot)
 	mux.HandleFunc("GET /json", srv.handleJSON)
 	mux.HandleFunc("GET /vpn", srv.handleVPN)
+	mux.HandleFunc("GET /trace", srv.handleTrace)
 	mux.HandleFunc("GET /headers", srv.handleHeaders)
 	mux.HandleFunc("GET /all", srv.handleAll)
 	mux.HandleFunc("GET /ua", srv.handleUA)
@@ -176,91 +184,311 @@ func (s *server) inspect(r *http.Request) requestInfo {
 	return info
 }
 
+// targetIP returns the IP to look up, which is the requester's IP unless
+// overridden by the path wildcard `/ip/{addr}` or the `?ip=<addr>` query.
+// The third return value flags whether the page is a third-party lookup
+// (so the HTML view can hide CF-Colo/Ray which are about the requester).
+func (s *server) targetIP(r *http.Request, info requestInfo) (netip.Addr, string, bool) {
+	override := strings.TrimSpace(r.PathValue("addr"))
+	if override == "" {
+		override = strings.TrimSpace(r.URL.Query().Get("ip"))
+	}
+	if override == "" {
+		return info.IP, info.IPRaw, false
+	}
+	addr, err := netip.ParseAddr(override)
+	if err != nil {
+		return info.IP, info.IPRaw, false
+	}
+	return addr, override, addr != info.IP
+}
+
+// ---------- Sec-CH-UA parsing ----------
+
+// clientHints summarizes the Sec-CH-UA family of headers Chromium-family
+// browsers send. Empty for Firefox/Safari, which don't send these.
+type clientHints struct {
+	Brand           string // "Google Chrome" preferred, falls back to first non-fake
+	Version         string // major version, e.g. "120"
+	Platform        string // "macOS" / "Windows" / "Linux" / etc. (no quotes)
+	PlatformVersion string
+	Mobile          bool
+}
+
+// Pretty returns "Chrome 120 on macOS 15" or "" if nothing parsed.
+func (h clientHints) Pretty() string {
+	if h.Brand == "" {
+		return ""
+	}
+	short := strings.TrimPrefix(h.Brand, "Google ")
+	short = strings.TrimPrefix(short, "Microsoft ")
+	out := short
+	if h.Version != "" {
+		out += " " + h.Version
+	}
+	if h.Platform != "" {
+		out += " on " + h.Platform
+		if h.PlatformVersion != "" {
+			out += " " + h.PlatformVersion
+		}
+	}
+	if h.Mobile {
+		out += " (mobile)"
+	}
+	return out
+}
+
+func parseClientHints(r *http.Request) clientHints {
+	out := clientHints{
+		Platform:        strings.Trim(r.Header.Get("Sec-CH-UA-Platform"), `"`),
+		PlatformVersion: strings.Trim(r.Header.Get("Sec-CH-UA-Platform-Version"), `"`),
+		Mobile:          strings.TrimSpace(r.Header.Get("Sec-CH-UA-Mobile")) == "?1",
+	}
+	// Trim noise: GREASE versions look like "0.0.0.0".
+	if out.PlatformVersion == "0.0.0.0" {
+		out.PlatformVersion = ""
+	}
+
+	// Sec-CH-UA: `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`
+	// We want the most-specific brand, skipping GREASE entries and "Chromium".
+	raw := r.Header.Get("Sec-CH-UA")
+	if raw == "" {
+		return out
+	}
+	type cand struct{ brand, version string }
+	var cands []cand
+	for _, part := range splitTopLevel(raw, ',') {
+		part = strings.TrimSpace(part)
+		// expect: "<brand>";v="<version>"
+		segs := strings.SplitN(part, ";", 2)
+		if len(segs) < 2 {
+			continue
+		}
+		brand := strings.Trim(strings.TrimSpace(segs[0]), `"`)
+		var version string
+		if v := strings.TrimSpace(segs[1]); strings.HasPrefix(v, "v=") {
+			version = strings.Trim(v[2:], `"`)
+		}
+		cands = append(cands, cand{brand, version})
+	}
+	pickFirst := func(want string) (string, string, bool) {
+		for _, c := range cands {
+			if strings.EqualFold(c.brand, want) {
+				return c.brand, c.version, true
+			}
+		}
+		return "", "", false
+	}
+	// Preference: Chrome / Edge / Opera / Brave / Vivaldi → then anything
+	// that isn't "Chromium" or a GREASE brand (those contain `?`, `_`, or
+	// are explicitly "Not...A...Brand" variants).
+	for _, want := range []string{"Google Chrome", "Microsoft Edge", "Opera", "Brave", "Vivaldi", "Arc"} {
+		if b, v, ok := pickFirst(want); ok {
+			out.Brand, out.Version = b, v
+			return out
+		}
+	}
+	for _, c := range cands {
+		l := strings.ToLower(c.brand)
+		if l == "chromium" {
+			continue
+		}
+		if strings.Contains(l, "not") && (strings.Contains(l, "brand") || strings.Contains(l, "_")) {
+			continue
+		}
+		out.Brand, out.Version = c.brand, c.version
+		return out
+	}
+	// All we got was Chromium — fall back to that.
+	if b, v, ok := pickFirst("Chromium"); ok {
+		out.Brand, out.Version = b, v
+	}
+	return out
+}
+
+// splitTopLevel splits on `sep` while ignoring it inside double-quoted
+// substrings. Sec-CH-UA values quote the brand string, which can contain
+// commas (rare) and the version with `;` separators, so we split carefully.
+func splitTopLevel(s string, sep byte) []string {
+	var out []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"':
+			depth ^= 1
+		case sep:
+			if depth == 0 {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	out = append(out, s[start:])
+	return out
+}
+
 // ---------- handlers ----------
 
-func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
+// dataset is what we render. Same shape across HTML/JSON/YAML/trace/all
+// so output formats stay in sync.
+type dataset struct {
+	IP        string `json:"ip" yaml:"ip"`
+	Version   string `json:"version" yaml:"version"`
+	Country   string `json:"country" yaml:"country"`
+	ASN       int    `json:"asn" yaml:"asn"`
+	ASOrg     string `json:"asorg" yaml:"asorg"`
+	Prefix    string `json:"prefix,omitempty" yaml:"prefix,omitempty"`
+	RIR       string `json:"rir,omitempty" yaml:"rir,omitempty"`
+	Allocated string `json:"allocated,omitempty" yaml:"allocated,omitempty"`
+	Reverse   string `json:"reverse,omitempty" yaml:"reverse,omitempty"`
+	UA        string `json:"ua,omitempty" yaml:"ua,omitempty"`
+	UAPretty  string `json:"ua_pretty,omitempty" yaml:"ua_pretty,omitempty"`
+	Via       string `json:"via,omitempty" yaml:"via,omitempty"`
+	Ray       string `json:"ray,omitempty" yaml:"ray,omitempty"`
+	Colo      string `json:"colo,omitempty" yaml:"colo,omitempty"`
+	VPN       vpnVerdict `json:"vpn" yaml:"vpn"`
+	DBLoaded  string `json:"db_loaded,omitempty" yaml:"db_loaded,omitempty"`
+	IsLookup  bool   `json:"-" yaml:"-"`
+	ReqIP     string `json:"-" yaml:"-"`
+}
+
+func (s *server) gather(r *http.Request) dataset {
 	info := s.inspect(r)
+	target, targetRaw, isLookup := s.targetIP(r, info)
+	asn := s.asn.Lookup(r.Context(), target)
+	verdict := s.vpn.Check(target, asn)
+
+	country := info.Country
+	if isLookup || country == "" {
+		// CF-IPCountry is about the requester, not the target. Use RIR
+		// country as a fallback for either case.
+		if asn.Country != "" {
+			country = asn.Country
+		}
+	}
+
+	hints := parseClientHints(r)
+
+	return dataset{
+		IP:        targetRaw,
+		Version:   ipVersion(target),
+		Country:   country,
+		ASN:       asn.ASN,
+		ASOrg:     asn.Org,
+		Prefix:    asn.Prefix,
+		RIR:       strings.ToLower(asn.RIR),
+		Allocated: asn.Allocated,
+		Reverse:   lookupReverse(r.Context(), target),
+		UA:        info.UA,
+		UAPretty:  hints.Pretty(),
+		Via:       info.Via,
+		Ray:       info.CFRay,
+		Colo:      cfColo(info.CFRay),
+		VPN:       verdict,
+		DBLoaded:  s.vpnLoadedAt(),
+		IsLookup:  isLookup,
+		ReqIP:     info.IPRaw,
+	}
+}
+
+func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	d := s.gather(r)
 	noStore(w)
 
 	if !wantsHTML(r) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintln(w, info.IPRaw)
+		_, _ = fmt.Fprintln(w, d.IP)
 		return
 	}
 
-	// Browser path: render the diagnostics page.
-	asn := s.asn.Lookup(r.Context(), info.IP)
-	verdict := s.vpn.Check(info.IP, asn)
-	revName := lookupReverse(r.Context(), info.IP)
-
-	data := struct {
-		IP        string
-		IPVersion   string
-		Country     string
+	view := struct {
+		dataset
 		CountryFlag string
-		ASN         int
-		ASOrg       string
-		Reverse     string
-		UA          string
-		Via         string
-		CFRay       string
-		Colo        string
-		Verdict     vpnVerdict
-		Loaded      string
 	}{
-		IP:          info.IPRaw,
-		IPVersion:   ipVersion(info.IP),
-		Country:     info.Country,
-		CountryFlag: countryFlag(info.Country),
-		ASN:         asn.ASN,
-		ASOrg:       asn.Org,
-		Reverse:     revName,
-		UA:          info.UA,
-		Via:         info.Via,
-		CFRay:       info.CFRay,
-		Colo:        cfColo(info.CFRay),
-		Verdict:   verdict,
-		Loaded:    s.vpnLoadedAt(),
+		dataset:     d,
+		CountryFlag: countryFlag(d.Country),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if err := indexTpl.Execute(w, data); err != nil {
+	if err := indexTpl.Execute(w, view); err != nil {
 		s.logger.Error("template", "err", err)
 	}
 }
 
 func (s *server) handleJSON(w http.ResponseWriter, r *http.Request) {
-	info := s.inspect(r)
-	asn := s.asn.Lookup(r.Context(), info.IP)
-	verdict := s.vpn.Check(info.IP, asn)
-
-	resp := map[string]any{
-		"ip":        info.IPRaw,
-		"version":   ipVersion(info.IP),
-		"country":   info.Country,
-		"asn":       asn.ASN,
-		"asorg":     asn.Org,
-		"reverse":   lookupReverse(r.Context(), info.IP),
-		"ua":        info.UA,
-		"host":      info.Host,
-		"via":       info.Via,
-		"ray":       info.CFRay,
-		"colo":      cfColo(info.CFRay),
-		"vpn":       verdict,
-		"db_loaded": s.vpnLoadedAt(),
+	d := s.gather(r)
+	switch strings.ToLower(r.URL.Query().Get("format")) {
+	case "yaml", "yml":
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		writeYAML(w, d)
+	case "hosts":
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		noStore(w)
+		host := d.Reverse
+		if host == "" {
+			host = "ip.unt1.com"
+		}
+		fmt.Fprintf(w, "%s\t%s\n", d.IP, host)
+	default:
+		writeJSON(w, http.StatusOK, d)
 	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *server) handleVPN(w http.ResponseWriter, r *http.Request) {
-	info := s.inspect(r)
-	asn := s.asn.Lookup(r.Context(), info.IP)
-	writeJSON(w, http.StatusOK, s.vpn.Check(info.IP, asn))
+	d := s.gather(r)
+	writeJSON(w, http.StatusOK, d.VPN)
+}
+
+func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
+	d := s.gather(r)
+	noStore(w)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	// Cloudflare-style key=value, deterministic order.
+	fmt.Fprintf(w, "fl=%s\n", d.Ray)
+	fmt.Fprintf(w, "h=%s\n", r.Host)
+	fmt.Fprintf(w, "ip=%s\n", d.IP)
+	fmt.Fprintf(w, "ts=%.3f\n", float64(time.Now().UnixMilli())/1000.0)
+	fmt.Fprintf(w, "visit_scheme=%s\n", scheme)
+	fmt.Fprintf(w, "uag=%s\n", d.UA)
+	fmt.Fprintf(w, "colo=%s\n", d.Colo)
+	fmt.Fprintf(w, "country=%s\n", d.Country)
+	fmt.Fprintf(w, "asn=AS%d\n", d.ASN)
+	fmt.Fprintf(w, "asorg=%s\n", d.ASOrg)
+	if d.Prefix != "" {
+		fmt.Fprintf(w, "prefix=%s\n", d.Prefix)
+	}
+	if d.RIR != "" {
+		fmt.Fprintf(w, "rir=%s\n", d.RIR)
+	}
+	if d.Allocated != "" {
+		fmt.Fprintf(w, "allocated=%s\n", d.Allocated)
+	}
+	if d.Reverse != "" {
+		fmt.Fprintf(w, "reverse=%s\n", d.Reverse)
+	}
+	fmt.Fprintf(w, "via=%s\n", d.Via)
+	fmt.Fprintf(w, "vpn=%s\n", onOff(d.VPN.VPN))
+	if d.VPN.Tor {
+		fmt.Fprintf(w, "tor=on\n")
+	}
+	if d.VPN.PrivacyProxy {
+		fmt.Fprintf(w, "privacy_proxy=on\n")
+	}
+	if d.VPN.Provider != "" {
+		fmt.Fprintf(w, "provider=%s\n", d.VPN.Provider)
+	}
 }
 
 func (s *server) handleHeaders(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +502,8 @@ func (s *server) handleHeaders(w http.ResponseWriter, r *http.Request) {
 		"CF-Connecting-IP", "CF-IPCountry", "CF-Ray", "CF-Visitor",
 		"X-Forwarded-For", "X-Forwarded-Proto", "X-Real-IP",
 		"User-Agent", "Accept", "Accept-Language", "Accept-Encoding",
-		"Referer", "Origin", "DNT", "Sec-CH-UA", "Sec-CH-UA-Platform",
+		"Referer", "Origin", "DNT",
+		"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform", "Sec-CH-UA-Platform-Version",
 	}
 	for _, k := range keys {
 		if v := r.Header.Get(k); v != "" {
@@ -284,29 +513,39 @@ func (s *server) handleHeaders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
-	info := s.inspect(r)
-	asn := s.asn.Lookup(r.Context(), info.IP)
-	verdict := s.vpn.Check(info.IP, asn)
+	d := s.gather(r)
 	noStore(w)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "ip:        %s\n", info.IPRaw)
-	fmt.Fprintf(w, "version:   %s\n", ipVersion(info.IP))
-	fmt.Fprintf(w, "country:   %s\n", emptyDash(info.Country))
-	fmt.Fprintf(w, "asn:       AS%d\n", asn.ASN)
-	fmt.Fprintf(w, "asorg:     %s\n", emptyDash(asn.Org))
-	fmt.Fprintf(w, "reverse:   %s\n", emptyDash(lookupReverse(r.Context(), info.IP)))
-	fmt.Fprintf(w, "ua:        %s\n", info.UA)
-	fmt.Fprintf(w, "host:      %s\n", info.Host)
-	fmt.Fprintf(w, "via:       %s\n", info.Via)
-	if info.CFRay != "" {
-		fmt.Fprintf(w, "ray:       %s\n", info.CFRay)
+	fmt.Fprintf(w, "ip:        %s\n", d.IP)
+	fmt.Fprintf(w, "version:   %s\n", d.Version)
+	fmt.Fprintf(w, "country:   %s\n", emptyDash(d.Country))
+	fmt.Fprintf(w, "asn:       AS%d\n", d.ASN)
+	fmt.Fprintf(w, "asorg:     %s\n", emptyDash(d.ASOrg))
+	if d.Prefix != "" {
+		fmt.Fprintf(w, "prefix:    %s\n", d.Prefix)
 	}
-	fmt.Fprintf(w, "vpn:       %t\n", verdict.VPN)
-	if verdict.Provider != "" {
-		fmt.Fprintf(w, "provider:  %s\n", verdict.Provider)
+	if d.RIR != "" {
+		fmt.Fprintf(w, "rir:       %s\n", d.RIR)
 	}
-	if len(verdict.Reasons) > 0 {
-		fmt.Fprintf(w, "reasons:   %s\n", strings.Join(verdict.Reasons, "; "))
+	if d.Allocated != "" {
+		fmt.Fprintf(w, "allocated: %s\n", d.Allocated)
+	}
+	fmt.Fprintf(w, "reverse:   %s\n", emptyDash(d.Reverse))
+	fmt.Fprintf(w, "ua:        %s\n", d.UA)
+	if d.UAPretty != "" {
+		fmt.Fprintf(w, "browser:   %s\n", d.UAPretty)
+	}
+	fmt.Fprintf(w, "via:       %s\n", d.Via)
+	if d.Ray != "" {
+		fmt.Fprintf(w, "ray:       %s\n", d.Ray)
+		fmt.Fprintf(w, "colo:      %s\n", d.Colo)
+	}
+	fmt.Fprintf(w, "vpn:       %t\n", d.VPN.VPN)
+	if d.VPN.Provider != "" {
+		fmt.Fprintf(w, "provider:  %s\n", d.VPN.Provider)
+	}
+	if len(d.VPN.Reasons) > 0 {
+		fmt.Fprintf(w, "reasons:   %s\n", strings.Join(d.VPN.Reasons, "; "))
 	}
 }
 
@@ -317,10 +556,69 @@ func (s *server) handleUA(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleReverse(w http.ResponseWriter, r *http.Request) {
-	info := s.inspect(r)
+	d := s.gather(r)
 	noStore(w)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintln(w, emptyDash(lookupReverse(r.Context(), info.IP)))
+	fmt.Fprintln(w, emptyDash(d.Reverse))
+}
+
+// onOff returns "on" / "off" for boolean trace fields.
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// writeYAML emits a tiny hand-rolled YAML for our flat-ish dataset.
+// Avoids pulling in a YAML dependency for two output formats.
+func writeYAML(w http.ResponseWriter, d dataset) {
+	emit := func(k, v string) {
+		if v == "" {
+			return
+		}
+		// Quote if value contains characters YAML would interpret.
+		if strings.ContainsAny(v, ":#@\"'\n") || strings.HasPrefix(v, " ") {
+			v = `"` + strings.ReplaceAll(v, `"`, `\"`) + `"`
+		}
+		fmt.Fprintf(w, "%s: %s\n", k, v)
+	}
+	emit("ip", d.IP)
+	emit("version", d.Version)
+	emit("country", d.Country)
+	if d.ASN != 0 {
+		fmt.Fprintf(w, "asn: %d\n", d.ASN)
+	}
+	emit("asorg", d.ASOrg)
+	emit("prefix", d.Prefix)
+	emit("rir", d.RIR)
+	emit("allocated", d.Allocated)
+	emit("reverse", d.Reverse)
+	emit("ua", d.UA)
+	emit("ua_pretty", d.UAPretty)
+	emit("via", d.Via)
+	emit("ray", d.Ray)
+	emit("colo", d.Colo)
+	fmt.Fprintf(w, "vpn:\n")
+	fmt.Fprintf(w, "  vpn: %t\n", d.VPN.VPN)
+	if d.VPN.Tor {
+		fmt.Fprintf(w, "  tor: true\n")
+	}
+	if d.VPN.PrivacyProxy {
+		fmt.Fprintf(w, "  privacy_proxy: true\n")
+	}
+	if d.VPN.Provider != "" {
+		fmt.Fprintf(w, "  provider: %s\n", d.VPN.Provider)
+	}
+	if d.VPN.Source != "" {
+		fmt.Fprintf(w, "  source: %s\n", d.VPN.Source)
+	}
+	if len(d.VPN.Reasons) > 0 {
+		fmt.Fprintf(w, "  reasons:\n")
+		for _, r := range d.VPN.Reasons {
+			fmt.Fprintf(w, "    - %q\n", r)
+		}
+	}
 }
 
 // ---------- helpers ----------

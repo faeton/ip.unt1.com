@@ -118,28 +118,36 @@
 <main>
   <header>
     <p class="kicker">ip.unt1.com</p>
-    {{if .Loaded}}<span class="meta-load">VPN db loaded {{.Loaded}}</span>{{end}}
+    {{if .DBLoaded}}<span class="meta-load">VPN db loaded {{.DBLoaded}}</span>{{end}}
   </header>
 
   <h1 id="ip">{{.IP}}</h1>
+  {{if .IsLookup}}
+  <p class="summary">
+    Looking up <code>{{.IP}}</code>. Your own IP is <a href="/">{{.ReqIP}}</a>.
+    {{if .Version}}IPv{{if eq .Version "v4"}}4{{else}}6{{end}}.{{end}}
+  </p>
+  {{else}}
   <p class="summary">
     A small IP resolver. Browsers see this; <code>curl</code> and scripts get a plain address.
-    {{if .IPVersion}}IPv{{if eq .IPVersion "v4"}}4{{else}}6{{end}}{{end}} via <code>{{.Via}}</code>.
+    {{if .Version}}IPv{{if eq .Version "v4"}}4{{else}}6{{end}}{{end}} via <code>{{.Via}}</code>.
   </p>
+  {{end}}
 
-  <div class="verdict {{if .Verdict.VPN}}{{if .Verdict.Tor}}warn{{else}}bad{{end}}{{else}}good{{end}}">
+  <div class="verdict {{if .VPN.VPN}}{{if .VPN.Tor}}warn{{else if .VPN.PrivacyProxy}}warn{{else}}bad{{end}}{{else}}good{{end}}">
     <span class="badge">
-      {{if .Verdict.Tor}}Tor exit
-      {{else if .Verdict.VPN}}VPN / Datacenter
+      {{if .VPN.Tor}}Tor exit
+      {{else if .VPN.PrivacyProxy}}Privacy proxy
+      {{else if .VPN.VPN}}VPN / Datacenter
       {{else}}Looks residential{{end}}
     </span>
     <div>
-      {{if .Verdict.Provider}}<strong>Provider:</strong> {{.Verdict.Provider}}{{end}}
-      {{if .Verdict.Source}}<span class="meta-load"> · {{.Verdict.Source}}</span>{{end}}
+      {{if .VPN.Provider}}<strong>Provider:</strong> {{.VPN.Provider}}{{end}}
+      {{if .VPN.Source}}<span class="meta-load"> · {{.VPN.Source}}</span>{{end}}
     </div>
-    {{if .Verdict.Reasons}}
+    {{if .VPN.Reasons}}
     <ul>
-      {{range .Verdict.Reasons}}<li>{{.}}</li>{{end}}
+      {{range .VPN.Reasons}}<li>{{.}}</li>{{end}}
     </ul>
     {{end}}
   </div>
@@ -157,20 +165,38 @@
       <strong>Network</strong>
       <span>{{if .ASOrg}}{{.ASOrg}}{{else}}—{{end}}</span>
     </div>
+    {{if .Prefix}}
+    <div class="tile" title="Announced prefix containing this IP">
+      <strong>Prefix</strong>
+      <span>{{.Prefix}}</span>
+    </div>
+    {{end}}
+    {{if .RIR}}
+    <div class="tile" title="Regional Internet Registry">
+      <strong>RIR</strong>
+      <span>{{.RIR}}{{if .Allocated}} · {{.Allocated}}{{end}}</span>
+    </div>
+    {{end}}
     <div class="tile big">
       <strong>Reverse DNS</strong>
       <span>{{if .Reverse}}{{.Reverse}}{{else}}—{{end}}</span>
     </div>
-    {{if .Colo}}
+    {{if and .Colo (not .IsLookup)}}
     <div class="tile" title="IATA code of the Cloudflare datacenter that handled this request">
       <strong>CF Colo</strong>
       <span>{{.Colo}}</span>
     </div>
     {{end}}
-    {{if .CFRay}}
+    {{if and .Ray (not .IsLookup)}}
     <div class="tile">
       <strong>Cloudflare Ray</strong>
-      <span>{{.CFRay}}</span>
+      <span>{{.Ray}}</span>
+    </div>
+    {{end}}
+    {{if .UAPretty}}
+    <div class="tile big" title="Parsed from Sec-CH-UA / Sec-CH-UA-Platform">
+      <strong>Browser</strong>
+      <span>{{.UAPretty}}</span>
     </div>
     {{end}}
     <div class="tile big">
@@ -181,10 +207,14 @@
 
   <div class="actions">
     <button id="copy" type="button">Copy IP</button>
-    <a class="button secondary" href="/json">JSON</a>
-    <a class="button secondary" href="/vpn">VPN verdict</a>
+    <a class="button secondary" href="/json{{if .IsLookup}}?ip={{.IP}}{{end}}">JSON</a>
+    <a class="button secondary" href="/vpn{{if .IsLookup}}?ip={{.IP}}{{end}}">VPN verdict</a>
+    <a class="button secondary" href="/trace">Trace</a>
     <a class="button secondary" href="/headers">Headers</a>
-    <a class="button secondary" href="/all">Plain debug</a>
+    <a class="button secondary" href="/all{{if .IsLookup}}?ip={{.IP}}{{end}}">Plain debug</a>
+    {{if not .IsLookup}}
+    <a class="button secondary" href="/json?format=yaml">YAML</a>
+    {{end}}
   </div>
 
   <details>
@@ -192,10 +222,13 @@
     <div class="body" id="webrtc">Running…</div>
   </details>
 
-  <pre><code>$ curl https://ip.unt1.com         # plain IP
-$ curl https://ip.unt1.com/json    # full JSON
-$ curl https://ip.unt1.com/vpn     # VPN verdict only
-$ curl https://ip.unt1.com/all     # all fields, plain text</code></pre>
+  <pre><code>$ curl https://ip.unt1.com                   # plain IP
+$ curl https://ip.unt1.com/json              # full JSON
+$ curl https://ip.unt1.com/json?format=yaml  # YAML
+$ curl https://ip.unt1.com/vpn               # VPN verdict only
+$ curl https://ip.unt1.com/trace             # Cloudflare-style key=value
+$ curl https://ip.unt1.com/all               # all fields, plain text
+$ curl https://ip.unt1.com/json?ip=8.8.8.8   # look up another IP</code></pre>
 
   <footer>
     Source: <a href="https://github.com/faeton/ip.unt1.com">github.com/faeton/ip.unt1.com</a> ·

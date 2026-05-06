@@ -30,9 +30,12 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 
 # Resource limits.
+# Sized for: ~14k VPN IPs (Mullvad/Nord/iVPN/AirVPN/Tor) + ~286k iCloud
+# Private Relay /27-/31 ranges + Cymru ASN cache + Go runtime overhead.
+# Bump if we add MaxMind GeoLite (~70MB DB mmap'd) or other heavy data.
 LimitNOFILE=65535
-MemoryHigh=128M
-MemoryMax=256M
+MemoryHigh=256M
+MemoryMax=512M
 
 Environment=IPUNT1_TRUST_CF=true
 Environment=IPUNT1_LOG_JSON=true

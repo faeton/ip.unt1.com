@@ -28,16 +28,24 @@ import (
 )
 
 type vpnVerdict struct {
-	VPN      bool     `json:"vpn"`
-	Tor      bool     `json:"tor,omitempty"`
-	Provider string   `json:"provider,omitempty"`
-	Reasons  []string `json:"reasons,omitempty"`
-	Source   string   `json:"source,omitempty"` // "ip-list" | "asn" | "asn+ip-list"
+	VPN          bool     `json:"vpn"`
+	Tor          bool     `json:"tor,omitempty"`
+	PrivacyProxy bool     `json:"privacy_proxy,omitempty"` // iCloud Private Relay etc.
+	Provider     string   `json:"provider,omitempty"`
+	Reasons      []string `json:"reasons,omitempty"`
+	Source       string   `json:"source,omitempty"` // "ip-list" | "asn" | "asn+ip-list" | "cidr"
+}
+
+type cidrEntry struct {
+	prefix   netip.Prefix
+	provider string // "icloud-private-relay"
 }
 
 type vpnSnapshot struct {
 	// IP → provider tag ("mullvad", "nordvpn", "ivpn", "airvpn", "tor")
 	ips map[netip.Addr]string
+	// CIDR ranges (iCloud Private Relay etc.) — small list, linear scan.
+	cidrs []cidrEntry
 	// ASN → label for known datacenter/VPN-rental ASNs.
 	dcASN map[int]string
 }
@@ -62,6 +70,11 @@ func newVPNDB(logger *slog.Logger) *vpnDB {
 	return d
 }
 
+func (d *vpnDB) Loaded() bool {
+	snap := d.snap.Load()
+	return snap != nil && (len(snap.ips) > 0 || len(snap.cidrs) > 0)
+}
+
 // Check classifies an IP. If both ip-list and ASN match, both are reported.
 func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 	v := vpnVerdict{}
@@ -79,6 +92,21 @@ func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 			v.Tor = true
 			v.Provider = ""
 			v.Reasons = []string{"matched Tor exit relay list"}
+		}
+	}
+
+	for _, c := range snap.cidrs {
+		if c.prefix.Contains(normalizeIP(ip)) {
+			v.VPN = true
+			v.PrivacyProxy = true
+			v.Provider = c.provider
+			if v.Source == "" {
+				v.Source = "cidr"
+			} else {
+				v.Source = v.Source + "+cidr"
+			}
+			v.Reasons = append(v.Reasons, "matched "+c.provider+" egress range "+c.prefix.String())
+			break
 		}
 	}
 
@@ -122,50 +150,92 @@ func (d *vpnDB) runRefreshLoop(ctx context.Context, markLoaded func()) {
 }
 
 func (d *vpnDB) refresh(ctx context.Context) error {
-	type result struct {
+	d.logger.Info("vpn refresh starting")
+	start := time.Now()
+	defer func() { d.logger.Info("vpn refresh done", "dur_ms", time.Since(start).Milliseconds()) }()
+
+	type ipResult struct {
 		provider string
 		ips      []netip.Addr
 		err      error
 	}
-	jobs := []func(context.Context) ([]netip.Addr, error){
+	type cidrResult struct {
+		provider string
+		prefixes []netip.Prefix
+		err      error
+	}
+
+	ipJobs := []func(context.Context) ([]netip.Addr, error){
 		d.fetchMullvad,
 		d.fetchNordVPN,
 		d.fetchIVPN,
 		d.fetchAirVPN,
 		d.fetchTor,
 	}
-	tags := []string{"mullvad", "nordvpn", "ivpn", "airvpn", "tor"}
+	ipTags := []string{"mullvad", "nordvpn", "ivpn", "airvpn", "tor"}
 
-	results := make(chan result, len(jobs))
-	for i, job := range jobs {
+	cidrJobs := []func(context.Context) ([]netip.Prefix, error){
+		d.fetchICloudPrivateRelay,
+	}
+	cidrTags := []string{"icloud-private-relay"}
+
+	ipCh := make(chan ipResult, len(ipJobs))
+	for i, job := range ipJobs {
 		i, job := i, job
 		go func() {
 			ips, err := job(ctx)
-			results <- result{provider: tags[i], ips: ips, err: err}
+			ipCh <- ipResult{provider: ipTags[i], ips: ips, err: err}
+		}()
+	}
+	cidrCh := make(chan cidrResult, len(cidrJobs))
+	for i, job := range cidrJobs {
+		i, job := i, job
+		go func() {
+			pfx, err := job(ctx)
+			cidrCh <- cidrResult{provider: cidrTags[i], prefixes: pfx, err: err}
 		}()
 	}
 
-	combined := make(map[netip.Addr]string, 16384)
+	combinedIPs := make(map[netip.Addr]string, 16384)
+	var combinedCIDRs []cidrEntry
 	var errs []error
-	for range jobs {
-		r := <-results
+	totalJobs := len(ipJobs) + len(cidrJobs)
+	successes := 0
+
+	for range ipJobs {
+		r := <-ipCh
 		if r.err != nil {
 			d.logger.Warn("vpn provider fetch", "provider", r.provider, "err", r.err)
 			errs = append(errs, r.err)
 			continue
 		}
 		d.logger.Info("vpn provider loaded", "provider", r.provider, "ips", len(r.ips))
+		successes++
 		for _, ip := range r.ips {
-			combined[normalizeIP(ip)] = r.provider
+			combinedIPs[normalizeIP(ip)] = r.provider
+		}
+	}
+	for range cidrJobs {
+		r := <-cidrCh
+		if r.err != nil {
+			d.logger.Warn("vpn cidr fetch", "provider", r.provider, "err", r.err)
+			errs = append(errs, r.err)
+			continue
+		}
+		d.logger.Info("vpn cidr loaded", "provider", r.provider, "ranges", len(r.prefixes))
+		successes++
+		for _, p := range r.prefixes {
+			combinedCIDRs = append(combinedCIDRs, cidrEntry{prefix: p, provider: r.provider})
 		}
 	}
 
 	d.snap.Store(&vpnSnapshot{
-		ips:   combined,
+		ips:   combinedIPs,
+		cidrs: combinedCIDRs,
 		dcASN: datacenterASNs(),
 	})
 
-	if len(errs) == len(jobs) {
+	if successes == 0 && totalJobs > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
@@ -310,6 +380,35 @@ func (d *vpnDB) fetchAirVPN(ctx context.Context) ([]netip.Addr, error) {
 				out = append(out, a)
 			}
 		}
+	}
+	return out, nil
+}
+
+// iCloud Private Relay: Apple publishes egress ranges as CSV.
+// https://mask-api.icloud.com/egress-ip-ranges.csv
+// Each line: <prefix>,<country>,<region>,<city>
+// e.g. "172.225.176.0/20,US,US-NY,New York"
+//
+// Apple's Private Relay is structurally a privacy proxy (two-hop through
+// CF/Akamai/Fastly egress), so flagging traffic from these ranges is
+// genuinely correct — the IP doesn't reflect the user's real location.
+func (d *vpnDB) fetchICloudPrivateRelay(ctx context.Context) ([]netip.Prefix, error) {
+	body, err := d.get(ctx, "https://mask-api.icloud.com/egress-ip-ranges.csv")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]netip.Prefix, 0, 256)
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		field := strings.SplitN(line, ",", 2)[0]
+		p, err := netip.ParsePrefix(field)
+		if err != nil {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out, nil
 }

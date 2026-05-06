@@ -28,8 +28,12 @@ import (
 )
 
 type asnInfo struct {
-	ASN int
-	Org string
+	ASN       int
+	Org       string
+	Prefix    string // announced prefix, e.g. "1.1.1.0/24"
+	RIR       string // arin / ripencc / apnic / lacnic / afrinic
+	Allocated string // YYYY-MM-DD as registered
+	Country   string // RIR-registered country code (may differ from CF-IPCountry)
 }
 
 type asnEntry struct {
@@ -92,12 +96,13 @@ func (a *asnResolver) resolve(ctx context.Context, ip netip.Addr) asnInfo {
 		a.logger.Debug("cymru origin lookup failed", "ip", ip, "err", err)
 		return asnInfo{}
 	}
-	asn := parseASNField(txts[0])
-	if asn == 0 {
+	// origin response: "ASN | prefix | country | rir | allocated"
+	info := parseOriginTXT(txts[0])
+	if info.ASN == 0 {
 		return asnInfo{}
 	}
-	org := a.lookupOrg(ctx, asn)
-	return asnInfo{ASN: asn, Org: org}
+	info.Org = a.lookupOrg(ctx, info.ASN)
+	return info
 }
 
 func (a *asnResolver) lookupOrg(ctx context.Context, asn int) string {
@@ -106,6 +111,7 @@ func (a *asnResolver) lookupOrg(ctx context.Context, asn int) string {
 	if err != nil || len(txts) == 0 {
 		return ""
 	}
+	// org response: "ASN | country | rir | allocated | ORGNAME, CC"
 	parts := strings.Split(txts[0], "|")
 	if len(parts) < 5 {
 		return ""
@@ -113,19 +119,26 @@ func (a *asnResolver) lookupOrg(ctx context.Context, asn int) string {
 	return strings.TrimSpace(parts[4])
 }
 
-// parseASNField pulls the first integer out of a TXT record like
-// "13335 | 1.1.1.0/24 | US | arin | ...". When an IP is announced from
-// multiple ASNs, Cymru returns them space-separated in field 0; we take
-// the first.
-func parseASNField(txt string) int {
-	first := strings.SplitN(txt, "|", 2)[0]
-	first = strings.TrimSpace(first)
-	first = strings.SplitN(first, " ", 2)[0]
-	n, err := strconv.Atoi(first)
-	if err != nil {
-		return 0
+func parseOriginTXT(txt string) asnInfo {
+	parts := strings.Split(txt, "|")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
 	}
-	return n
+	if len(parts) < 5 {
+		return asnInfo{}
+	}
+	asnStr := strings.SplitN(parts[0], " ", 2)[0]
+	asn, err := strconv.Atoi(asnStr)
+	if err != nil {
+		return asnInfo{}
+	}
+	return asnInfo{
+		ASN:       asn,
+		Prefix:    parts[1],
+		Country:   parts[2],
+		RIR:       parts[3],
+		Allocated: parts[4],
+	}
 }
 
 func nibbleReverseV6(ip netip.Addr) string {
