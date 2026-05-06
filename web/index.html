@@ -218,17 +218,52 @@ $ curl https://ip.unt1.com/all     # all fields, plain text</code></pre>
     setTimeout(() => { btn.textContent = 'Copy IP'; }, 1400);
   });
 
-  // WebRTC local-IP leak check. Surfaces what an attacker page could see
-  // from the browser — useful signal alongside the server-side verdict.
+  // WebRTC leak check. Browsers can expose local + public IPs via the
+  // WebRTC API even behind a VPN; this block shows what an arbitrary
+  // page could harvest from your browser right now.
+  //
+  // Parse candidate strings by SDP grammar rather than regex-fishing:
+  //   candidate:<foundation> <component> <transport> <priority>
+  //             <address> <port> typ <type> [...]
+  // Address is the 5th whitespace-separated token (index 4).
   (async () => {
     const out = document.getElementById('webrtc');
     if (!window.RTCPeerConnection) { out.textContent = 'RTCPeerConnection unavailable.'; return; }
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
-    const found = new Set();
+    const found = new Map(); // address -> type (host/srflx/relay)
+
+    const isIPv4 = s => /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/.test(s);
+    const isIPv6 = s => s.includes(':') && /^[0-9a-f:.%]+$/i.test(s) && s.length >= 3;
+    const classify = addr => {
+      if (isIPv4(addr)) {
+        if (/^10\./.test(addr) || /^192\.168\./.test(addr) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(addr) ||
+            /^127\./.test(addr) || /^169\.254\./.test(addr)) return 'private';
+        return 'public';
+      }
+      if (isIPv6(addr)) {
+        if (/^fe80:/i.test(addr) || /^fc/i.test(addr) || /^fd/i.test(addr) || addr === '::1') return 'private';
+        return 'public';
+      }
+      return null;
+    };
+
     pc.onicecandidate = e => {
-      if (!e.candidate) return;
-      const m = e.candidate.candidate.match(/(\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[0-9a-f:]{4,}\b)/i);
-      if (m) found.add(m[1]);
+      if (!e.candidate || !e.candidate.candidate) return;
+      const parts = e.candidate.candidate.replace(/^candidate:/, '').split(/\s+/);
+      if (parts.length < 8) return;
+      const address = parts[4];
+      const typIdx = parts.indexOf('typ');
+      const candType = typIdx >= 0 ? parts[typIdx + 1] : '?';
+      // Modern Chrome returns mDNS `.local` placeholder hostnames instead of
+      // raw private IPs — that's a feature, surface it as such.
+      if (/\.local$/i.test(address)) {
+        found.set(address, 'mdns (' + candType + ')');
+        return;
+      }
+      const cls = classify(address);
+      if (!cls) return;
+      found.set(address, cls + ' (' + candType + ')');
     };
     pc.createDataChannel('x');
     try {
@@ -240,12 +275,13 @@ $ curl https://ip.unt1.com/all     # all fields, plain text</code></pre>
     }
     setTimeout(() => {
       pc.close();
-      const ips = [...found];
-      if (ips.length === 0) {
-        out.textContent = 'No candidates surfaced.';
+      if (found.size === 0) {
+        out.textContent = 'No candidates surfaced (mDNS-protected or blocked).';
         return;
       }
-      out.innerHTML = ips.map(s => `<div>${s}</div>`).join('');
+      out.innerHTML = [...found.entries()]
+        .map(([addr, kind]) => `<div>${addr} <span style="color:var(--muted)">— ${kind}</span></div>`)
+        .join('');
     }, 1500);
   })();
 </script>
