@@ -1,0 +1,21 @@
+# Drop-in replacement for the existing ip.unt1.com Caddy block.
+# Caddy stays in front for TLS + Cloudflare interop; the Go binary
+# handles routing/HTML/JSON/VPN detection.
+
+ip.unt1.com {
+	encode gzip
+	header {
+		# These are also set by the upstream, but Caddy wins on conflicts.
+		-Server
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+	}
+
+	# Forward everything to the local Go service. Caddy already adds
+	# X-Forwarded-For; CF-Connecting-IP / CF-IPCountry pass through
+	# unchanged from Cloudflare.
+	reverse_proxy 127.0.0.1:8080 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+}
