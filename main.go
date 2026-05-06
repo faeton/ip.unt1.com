@@ -199,30 +199,30 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	data := struct {
 		IP        string
-		IPVersion string
-		Country   string
+		IPVersion   string
+		Country     string
 		CountryFlag string
-		ASN       int
-		ASOrg     string
-		Reverse   string
-		UA        string
-		Host      string
-		Via       string
-		CFRay     string
-		Verdict   vpnVerdict
-		Loaded    string
+		ASN         int
+		ASOrg       string
+		Reverse     string
+		UA          string
+		Via         string
+		CFRay       string
+		Colo        string
+		Verdict     vpnVerdict
+		Loaded      string
 	}{
-		IP:        info.IPRaw,
-		IPVersion: ipVersion(info.IP),
-		Country:   info.Country,
+		IP:          info.IPRaw,
+		IPVersion:   ipVersion(info.IP),
+		Country:     info.Country,
 		CountryFlag: countryFlag(info.Country),
-		ASN:       asn.ASN,
-		ASOrg:     asn.Org,
-		Reverse:   revName,
-		UA:        info.UA,
-		Host:      info.Host,
-		Via:       info.Via,
-		CFRay:     info.CFRay,
+		ASN:         asn.ASN,
+		ASOrg:       asn.Org,
+		Reverse:     revName,
+		UA:          info.UA,
+		Via:         info.Via,
+		CFRay:       info.CFRay,
+		Colo:        cfColo(info.CFRay),
 		Verdict:   verdict,
 		Loaded:    s.vpnLoadedAt(),
 	}
@@ -250,6 +250,7 @@ func (s *server) handleJSON(w http.ResponseWriter, r *http.Request) {
 		"host":      info.Host,
 		"via":       info.Via,
 		"ray":       info.CFRay,
+		"colo":      cfColo(info.CFRay),
 		"vpn":       verdict,
 		"db_loaded": s.vpnLoadedAt(),
 	}
@@ -361,6 +362,19 @@ func emptyDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// cfColo extracts the airport-code suffix from a CF-Ray header
+// (e.g. "9f7aa17abb769816-CDG" → "CDG"). The suffix is the IATA code
+// of the Cloudflare datacenter that handled the request.
+func cfColo(ray string) string {
+	if i := strings.LastIndexByte(ray, '-'); i >= 0 && i+1 < len(ray) {
+		code := ray[i+1:]
+		if len(code) == 3 {
+			return code
+		}
+	}
+	return ""
 }
 
 // countryFlag turns ISO-3166-1 alpha-2 into a regional indicator emoji pair.

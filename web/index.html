@@ -161,10 +161,12 @@
       <strong>Reverse DNS</strong>
       <span>{{if .Reverse}}{{.Reverse}}{{else}}—{{end}}</span>
     </div>
-    <div class="tile">
-      <strong>Host</strong>
-      <span>{{.Host}}</span>
+    {{if .Colo}}
+    <div class="tile" title="IATA code of the Cloudflare datacenter that handled this request">
+      <strong>CF Colo</strong>
+      <span>{{.Colo}}</span>
     </div>
+    {{end}}
     {{if .CFRay}}
     <div class="tile">
       <strong>Cloudflare Ray</strong>
