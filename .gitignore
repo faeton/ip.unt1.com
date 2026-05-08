@@ -1,5 +1,7 @@
 bin/
 dist/
+/ipunt1
+/ip.unt1.com
 *.log
 .DS_Store
 .env

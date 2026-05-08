@@ -347,6 +347,8 @@ type dataset struct {
 	Via       string `json:"via,omitempty" yaml:"via,omitempty"`
 	Ray       string `json:"ray,omitempty" yaml:"ray,omitempty"`
 	Colo      string `json:"colo,omitempty" yaml:"colo,omitempty"`
+	ColoCity    string `json:"colo_city,omitempty" yaml:"colo_city,omitempty"`
+	ColoCountry string `json:"colo_country,omitempty" yaml:"colo_country,omitempty"`
 	VPN       vpnVerdict `json:"vpn" yaml:"vpn"`
 	DBLoaded  string `json:"db_loaded,omitempty" yaml:"db_loaded,omitempty"`
 	IsLookup  bool   `json:"-" yaml:"-"`
@@ -370,6 +372,9 @@ func (s *server) gather(r *http.Request) dataset {
 
 	hints := parseClientHints(r)
 
+	colo := cfColo(info.CFRay)
+	coloCityName, coloCC := coloLocation(colo)
+
 	return dataset{
 		IP:        targetRaw,
 		Version:   ipVersion(target),
@@ -383,8 +388,10 @@ func (s *server) gather(r *http.Request) dataset {
 		UA:        info.UA,
 		UAPretty:  hints.Pretty(),
 		Via:       info.Via,
-		Ray:       info.CFRay,
-		Colo:      cfColo(info.CFRay),
+		Ray:         info.CFRay,
+		Colo:        colo,
+		ColoCity:    coloCityName,
+		ColoCountry: coloCC,
 		VPN:       verdict,
 		DBLoaded:  s.vpnLoadedAt(),
 		IsLookup:  isLookup,
@@ -405,9 +412,15 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	view := struct {
 		dataset
 		CountryFlag string
+		ColoFlag    string
+		Verdict     verdictView
+		IPParts     []ipPart
 	}{
 		dataset:     d,
 		CountryFlag: countryFlag(d.Country),
+		ColoFlag:    countryFlag(d.ColoCountry),
+		Verdict:     classifyVerdict(d.VPN),
+		IPParts:     splitIPParts(d.IP),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -463,6 +476,10 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "visit_scheme=%s\n", scheme)
 	fmt.Fprintf(w, "uag=%s\n", d.UA)
 	fmt.Fprintf(w, "colo=%s\n", d.Colo)
+	if d.ColoCity != "" {
+		fmt.Fprintf(w, "colo_city=%s\n", d.ColoCity)
+		fmt.Fprintf(w, "colo_country=%s\n", d.ColoCountry)
+	}
 	fmt.Fprintf(w, "country=%s\n", d.Country)
 	fmt.Fprintf(w, "asn=AS%d\n", d.ASN)
 	fmt.Fprintf(w, "asorg=%s\n", d.ASOrg)
@@ -538,7 +555,11 @@ func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "via:       %s\n", d.Via)
 	if d.Ray != "" {
 		fmt.Fprintf(w, "ray:       %s\n", d.Ray)
-		fmt.Fprintf(w, "colo:      %s\n", d.Colo)
+		if d.ColoCity != "" {
+			fmt.Fprintf(w, "colo:      %s (%s, %s)\n", d.Colo, d.ColoCity, d.ColoCountry)
+		} else {
+			fmt.Fprintf(w, "colo:      %s\n", d.Colo)
+		}
 	}
 	fmt.Fprintf(w, "vpn:       %t\n", d.VPN.VPN)
 	if d.VPN.Provider != "" {
@@ -599,6 +620,8 @@ func writeYAML(w http.ResponseWriter, d dataset) {
 	emit("via", d.Via)
 	emit("ray", d.Ray)
 	emit("colo", d.Colo)
+	emit("colo_city", d.ColoCity)
+	emit("colo_country", d.ColoCountry)
 	fmt.Fprintf(w, "vpn:\n")
 	fmt.Fprintf(w, "  vpn: %t\n", d.VPN.VPN)
 	if d.VPN.Tor {
@@ -660,6 +683,95 @@ func emptyDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// verdictView is the compact human-readable shape used by the HTML
+// template's verdict strip. It boils the multi-flag VPN result down to
+// one tone + one stamp word + a one-line "what" + a one-line source.
+type verdictView struct {
+	Tone  string // "good" | "warn" | "bad"
+	Stamp string // "Clean" | "VPN" | "Tor" | "Private Relay" | "WARP"
+	What  string
+	Src   string
+}
+
+func classifyVerdict(v vpnVerdict) verdictView {
+	switch {
+	case v.Tor:
+		return verdictView{Tone: "warn", Stamp: "Tor", What: "Tor exit relay", Src: "tor exit list"}
+	case v.Provider == "cloudflare-warp":
+		return verdictView{Tone: "warn", Stamp: "WARP", What: "Cloudflare WARP / 1.1.1.1", Src: "AS13335 egress"}
+	case v.PrivacyProxy:
+		return verdictView{Tone: "warn", Stamp: "Private Relay", What: "iCloud Private Relay egress", Src: "apple egress cidr"}
+	case v.VPN:
+		name := providerLabel(v.Provider)
+		if name == "" {
+			name = "Hosting / VPN network"
+		}
+		return verdictView{Tone: "bad", Stamp: "VPN", What: name, Src: sourceLabel(v.Source)}
+	default:
+		return verdictView{Tone: "good", Stamp: "Clean", What: "No flags raised", Src: "all sources clear"}
+	}
+}
+
+func providerLabel(k string) string {
+	switch k {
+	case "mullvad":
+		return "Mullvad"
+	case "nordvpn":
+		return "NordVPN"
+	case "ivpn":
+		return "iVPN"
+	case "airvpn":
+		return "AirVPN"
+	case "icloud-private-relay":
+		return "iCloud Private Relay"
+	case "cloudflare-warp":
+		return "Cloudflare WARP"
+	}
+	return k
+}
+
+func sourceLabel(s string) string {
+	switch s {
+	case "ip-list":
+		return "matched published server IP"
+	case "asn":
+		return "matched datacenter ASN"
+	case "asn+ip-list":
+		return "matched server IP + datacenter ASN"
+	case "cidr":
+		return "matched egress CIDR"
+	}
+	return s
+}
+
+// ipPart is one segment of an IP address split for styled rendering:
+// either a numeric octet/group ("Sep" false) or a separator ("." or ":").
+type ipPart struct {
+	Sep bool
+	V   string
+}
+
+func splitIPParts(ip string) []ipPart {
+	if ip == "" {
+		return nil
+	}
+	sep := byte('.')
+	if strings.Contains(ip, ":") {
+		sep = ':'
+	}
+	var out []ipPart
+	start := 0
+	for i := 0; i < len(ip); i++ {
+		if ip[i] == sep {
+			out = append(out, ipPart{V: ip[start:i]})
+			out = append(out, ipPart{Sep: true, V: string(sep)})
+			start = i + 1
+		}
+	}
+	out = append(out, ipPart{V: ip[start:]})
+	return out
 }
 
 // cfColo extracts the airport-code suffix from a CF-Ray header

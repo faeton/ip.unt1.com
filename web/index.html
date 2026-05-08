@@ -1,320 +1,679 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="auto">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
 <title>{{.IP}} — ip.unt1.com</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+  // Apply persisted theme synchronously to avoid FOUC.
+  try {
+    var t = localStorage.getItem('theme') || 'auto';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (_) {}
+</script>
 <style>
-  :root {
-    --bg: #fafafa;
-    --fg: #111;
-    --muted: #6b6b6b;
-    --tile: #fff;
-    --border: #e5e5e5;
-    --accent: #0a66ff;
-    --good: #1a7f37;
-    --warn: #b35900;
-    --bad: #c93a3a;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  :root, [data-theme="paper"] {
+    --bg:#f5f1e8; --bg-2:#efeadd; --bg-edge:#e8e1d0; --surface:#fbf8f0;
+    --ink:#1a1a17; --ink-2:#2c2c26; --muted:#6e6a5d; --muted-2:#9d998c;
+    --rule:#2c2c26; --rule-soft:#c9c2b1;
+    --accent:#2f6b3b; --good:#2f6b3b; --warn:#8a5a18; --bad:#8c2a26;
+    --term-bg:#1a1a17; --term-fg:#f5f1e8;
+    --selection-bg:var(--ink); --selection-fg:var(--bg);
+    --shadow:0 24px 48px -28px rgba(0,0,0,0.18);
   }
+  [data-theme="light"] {
+    --bg:#f7f7f8; --bg-2:#ffffff; --bg-edge:#e9eaed; --surface:#ffffff;
+    --ink:#0e1015; --ink-2:#2a2d36; --muted:#6c707b; --muted-2:#a4a8b3;
+    --rule:#1a1c22; --rule-soft:#d9dbe1;
+    --accent:#2255cc; --good:#1f7a44; --warn:#a86316; --bad:#b32a2a;
+    --term-bg:#0e1015; --term-fg:#f7f7f8;
+    --selection-bg:#2255cc; --selection-fg:#ffffff;
+    --shadow:0 24px 48px -32px rgba(20,30,60,0.18);
+  }
+  [data-theme="slate"] {
+    --bg:#181b22; --bg-2:#1f232c; --bg-edge:#11141a; --surface:#232732;
+    --ink:#ecedf2; --ink-2:#c8cad3; --muted:#8b8f9c; --muted-2:#5b5e69;
+    --rule:#ecedf2; --rule-soft:#353945;
+    --accent:#7da7ff; --good:#6dd29c; --warn:#f0c46a; --bad:#ff7c7c;
+    --term-bg:#0c0e13; --term-fg:#ecedf2;
+    --selection-bg:#7da7ff; --selection-fg:#181b22;
+    --shadow:0 24px 48px -28px rgba(0,0,0,0.6);
+  }
+  [data-theme="terminal"] {
+    --bg:#0c100c; --bg-2:#131a13; --bg-edge:#060906; --surface:#131a13;
+    --ink:#c8e4c8; --ink-2:#a8d6a8; --muted:#6c8c6c; --muted-2:#46604b;
+    --rule:#c8e4c8; --rule-soft:#2e442e;
+    --accent:#7be07b; --good:#7be07b; --warn:#e8c46a; --bad:#ff8b6e;
+    --term-bg:#060906; --term-fg:#c8e4c8;
+    --selection-bg:#7be07b; --selection-fg:#0c100c;
+    --shadow:0 24px 48px -28px rgba(0,0,0,0.7);
+  }
+  /* auto theme tracks prefers-color-scheme */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e0f12;
-      --fg: #f5f5f5;
-      --muted: #9aa0a6;
-      --tile: #16181d;
-      --border: #2a2d34;
-      --accent: #4d8fff;
-      --good: #4ec97b;
-      --warn: #f0b65a;
-      --bad: #ff6e6e;
+    :root[data-theme="auto"] {
+      --bg:#181b22; --bg-2:#1f232c; --bg-edge:#11141a; --surface:#232732;
+      --ink:#ecedf2; --ink-2:#c8cad3; --muted:#8b8f9c; --muted-2:#5b5e69;
+      --rule:#ecedf2; --rule-soft:#353945;
+      --accent:#7da7ff; --good:#6dd29c; --warn:#f0c46a; --bad:#ff7c7c;
+      --term-bg:#0c0e13; --term-fg:#ecedf2;
+      --selection-bg:#7da7ff; --selection-fg:#181b22;
+      --shadow:0 24px 48px -28px rgba(0,0,0,0.6);
     }
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
+
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { background:var(--bg-edge); color:var(--ink); transition:background 200ms ease, color 200ms ease; }
   body {
-    background: var(--bg); color: var(--fg);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    min-height: 100dvh;
-    padding: 28px 20px 64px;
+    font-family:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:13px; line-height:1.55; min-height:100dvh;
+    font-feature-settings:"ss01","zero","cv02";
+    -webkit-font-smoothing:antialiased;
   }
-  main {
-    max-width: 880px; margin: 0 auto;
+  ::selection { background:var(--selection-bg); color:var(--selection-fg); }
+  a { color:inherit; text-decoration:none; border-bottom:1px solid var(--rule-soft); }
+  a:hover { border-bottom-color:var(--ink); }
+
+  .sheet {
+    max-width:600px; margin:0 auto; background:var(--bg);
+    min-height:100dvh; padding:24px 22px 56px; position:relative;
+    transition:background 200ms ease;
   }
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
-  .kicker { font-family: var(--mono); color: var(--muted); font-size: 13px; letter-spacing: 0.02em; margin: 0; }
-  .meta-load { color: var(--muted); font-size: 12px; font-family: var(--mono); }
-  h1 {
-    font-family: var(--mono); font-size: clamp(28px, 6vw, 44px);
-    margin: 4px 0 6px; word-break: break-all; letter-spacing: -0.01em;
+  @media (min-width:660px) {
+    .sheet { margin-top:28px; margin-bottom:28px; min-height:auto; box-shadow:var(--shadow); }
   }
-  .summary { color: var(--muted); margin: 0 0 22px; max-width: 60ch; }
-  .grid {
-    display: grid; gap: 10px;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    margin: 18px 0 22px;
+
+  /* topbar */
+  .topbar {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:12px; padding-bottom:12px; border-bottom:1px solid var(--rule);
+    font-size:11px; letter-spacing:0.04em;
   }
-  .tile {
-    background: var(--tile); border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px 14px;
-    display: flex; flex-direction: column; gap: 4px;
-    min-height: 64px;
+  .brand { display:flex; align-items:center; gap:8px; font-weight:600; }
+  .brand .dot {
+    width:7px; height:7px; border-radius:50%; background:var(--good);
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--good) 22%, transparent);
   }
-  .tile.big { grid-column: span 2; }
-  @media (max-width: 520px) { .tile.big { grid-column: span 1; } }
-  .tile strong { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.06em; font-weight: 600; }
-  .tile span { font-family: var(--mono); font-size: 14px; word-break: break-all; }
+  .topbar .meta { color:var(--muted); display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+  .topbar .meta .sep { color:var(--rule-soft); }
+  .rtc-summary {
+    display:inline-flex; align-items:center; gap:6px;
+    color:var(--muted); cursor:help;
+  }
+  .rtc-led {
+    width:6px; height:6px; border-radius:50%;
+    background:var(--muted-2); transition:background 200ms ease;
+  }
+  .rtc-summary[data-state="probing"] .rtc-led { background:var(--warn); animation:rtc-pulse 1s ease-in-out infinite; }
+  .rtc-summary[data-state="ok"] .rtc-led      { background:var(--good); }
+  .rtc-summary[data-state="leak"] .rtc-led    { background:var(--bad); }
+  .rtc-summary[data-state="na"] .rtc-led      { background:var(--muted-2); }
+  @keyframes rtc-pulse { 0%,100% { opacity:1 } 50% { opacity:0.35 } }
+
+  /* theme switch */
+  .theme-switch { display:inline-flex; gap:4px; padding:2px; border:1px solid var(--rule-soft); background:var(--bg-2); }
+  .theme-switch button {
+    width:18px; height:18px; padding:0; border:1px solid transparent;
+    cursor:pointer; background:transparent; display:inline-block;
+    transition:transform 80ms ease;
+  }
+  .theme-switch button:hover { transform:scale(1.08); }
+  .theme-switch button .swatch { display:block; width:100%; height:100%; position:relative; overflow:hidden; }
+  .theme-switch button .swatch::after {
+    content:""; position:absolute; right:0; bottom:0; width:50%; height:50%;
+    background:var(--sw-ink, #000);
+  }
+  .theme-switch button.active { outline:1.5px solid var(--ink); outline-offset:1px; }
+  .theme-switch button[data-key="auto"] .swatch { background:linear-gradient(135deg,#f5f1e8 0 50%,#181b22 50% 100%); }
+  .theme-switch button[data-key="auto"] .swatch::after { display:none; }
+
+  /* hero */
+  .hero { padding:22px 0 18px; border-bottom:1px solid var(--rule); }
+  .hero .label {
+    display:flex; justify-content:space-between; align-items:baseline;
+    font-size:10.5px; letter-spacing:0.16em; text-transform:uppercase;
+    color:var(--muted); margin-bottom:10px;
+  }
+  .hero .label .v {
+    font-size:9.5px; background:var(--ink); color:var(--bg);
+    padding:1px 7px; letter-spacing:0.12em; border-radius:2px;
+  }
+  .hero .ip {
+    font-weight:600; font-size:clamp(34px, 11vw, 56px);
+    line-height:1; letter-spacing:-0.025em; word-break:break-all;
+    color:var(--ink); cursor:copy;
+  }
+  .hero .ip .sep { color:var(--muted-2); font-weight:400; }
+  .hero .lookup-note { font-size:11.5px; color:var(--muted); margin-top:8px; }
+  .hero .lookup-note a { font-weight:500; }
+
+  /* verdict strip */
   .verdict {
-    display: flex; flex-direction: column; gap: 6px;
-    border-radius: 10px; padding: 14px 16px;
-    border: 1px solid var(--border);
-    background: var(--tile);
+    margin-top:16px; display:flex; align-items:stretch;
+    border:1px solid var(--rule); background:var(--surface);
+    font-size:11.5px; overflow:hidden;
   }
-  .verdict.bad { border-color: var(--bad); }
-  .verdict.bad .badge { background: var(--bad); color: #fff; }
-  .verdict.good { border-color: var(--good); }
-  .verdict.good .badge { background: var(--good); color: #fff; }
-  .verdict.warn { border-color: var(--warn); }
-  .verdict.warn .badge { background: var(--warn); color: #fff; }
-  .badge {
-    display: inline-block; align-self: flex-start;
-    padding: 3px 10px; border-radius: 999px;
-    font-family: var(--mono); font-size: 12px; font-weight: 600;
-    letter-spacing: 0.04em; text-transform: uppercase;
+  .v-stamp {
+    display:inline-flex; align-items:center; gap:7px;
+    padding:9px 12px; font-weight:600; letter-spacing:0.08em;
+    text-transform:uppercase; font-size:10.5px;
+    background:var(--ink); color:var(--bg); white-space:nowrap;
   }
-  .verdict ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
-  .verdict li { font-size: 13px; }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
-  .button, button {
-    appearance: none; cursor: pointer;
-    background: var(--accent); color: #fff; border: 0;
-    padding: 9px 14px; border-radius: 8px;
-    font: inherit; font-weight: 600; font-size: 13px;
-    text-decoration: none;
+  .verdict.good .v-stamp { background:var(--good); color:var(--bg); }
+  .verdict.warn .v-stamp { background:var(--warn); color:var(--bg); }
+  .verdict.bad  .v-stamp { background:var(--bad);  color:var(--bg); }
+  .v-stamp .led { width:6px; height:6px; border-radius:50%; background:currentColor; opacity:0.9; }
+  .v-body {
+    padding:9px 12px; display:flex; align-items:center; flex-wrap:wrap;
+    gap:4px 10px; flex:1; min-width:0;
   }
-  .button.secondary, button.secondary {
-    background: transparent; color: var(--fg);
-    border: 1px solid var(--border);
+  .v-body .what { color:var(--ink); font-weight:500; }
+  .v-body .src { color:var(--muted); font-size:11px; }
+
+  .verdict-detail {
+    margin-top:10px; padding:10px 12px;
+    background:var(--bg-2); border:1px solid var(--rule-soft);
+    font-size:11.5px; color:var(--ink-2);
   }
-  .button:hover, button:hover { filter: brightness(1.05); }
-  details { margin: 16px 0; border: 1px solid var(--border); border-radius: 10px; background: var(--tile); }
-  summary { cursor: pointer; padding: 12px 14px; font-weight: 600; user-select: none; }
-  details[open] summary { border-bottom: 1px solid var(--border); }
-  details .body { padding: 12px 14px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
-  pre {
-    background: var(--tile); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px;
-    font-family: var(--mono); font-size: 13px;
-    overflow-x: auto; margin: 16px 0;
+  .verdict-detail ul { list-style:none; display:flex; flex-direction:column; gap:4px; }
+  .verdict-detail li::before { content:"› "; color:var(--muted-2); }
+
+  /* actions */
+  .actions { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px; }
+  .btn {
+    font:inherit; font-size:11.5px; font-weight:500; letter-spacing:0.02em;
+    padding:7px 11px; border:1px solid var(--rule); background:transparent;
+    color:var(--ink); text-decoration:none; cursor:pointer;
   }
-  footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
-  footer a { color: var(--muted); }
-  .copied { color: var(--good); font-family: var(--mono); font-size: 12px; }
+  .btn.primary { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  .btn:hover { filter:brightness(1.05); }
+
+  /* block headers */
+  .block { padding:18px 0 8px; border-bottom:1px solid var(--rule); }
+  .block:last-of-type { border-bottom:0; }
+  .block-head {
+    display:flex; align-items:center; gap:8px;
+    font-size:10.5px; letter-spacing:0.16em; text-transform:uppercase;
+    color:var(--muted); margin-bottom:12px;
+  }
+  .block-head .n {
+    font-weight:600; color:var(--ink); background:var(--bg-2);
+    padding:1px 6px; border:1px solid var(--rule-soft);
+  }
+  .block-head .rule {
+    flex:1; height:1px;
+    background:repeating-linear-gradient(90deg, var(--rule-soft) 0 4px, transparent 4px 8px);
+  }
+  .block-head .aside { font-size:10.5px; letter-spacing:0.04em; text-transform:none; color:var(--muted-2); }
+
+  /* primary 2-up */
+  .primary {
+    display:grid; grid-template-columns:1fr 1fr; gap:1px;
+    background:var(--rule-soft); border:1px solid var(--rule-soft);
+  }
+  .primary .cell { background:var(--surface); padding:14px; }
+  .primary .cell.full { grid-column:span 2; }
+  .primary .cell .k {
+    font-size:10px; letter-spacing:0.14em; text-transform:uppercase;
+    color:var(--muted); margin-bottom:4px;
+  }
+  .primary .cell .v {
+    font-size:16px; font-weight:500; color:var(--ink);
+    line-height:1.25; word-break:break-word;
+  }
+  .primary .cell .v .flag { margin-right:6px; font-size:18px; vertical-align:-2px; }
+  .primary .cell .v small {
+    display:block; font-size:11.5px; font-weight:400;
+    color:var(--muted); margin-top:3px; letter-spacing:0;
+  }
+  .primary .cell.tall .v { font-size:13.5px; font-weight:400; }
+
+  /* rows */
+  .rows { display:flex; flex-direction:column; }
+  .row {
+    display:grid; grid-template-columns:100px 1fr; gap:12px;
+    padding:9px 0; border-top:1px dashed var(--rule-soft);
+    align-items:baseline; font-size:12.5px;
+  }
+  .row:first-child { border-top:0; }
+  .row .k {
+    font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted);
+  }
+  .row .v { color:var(--ink); word-break:break-word; }
+  .row .v.dim { color:var(--muted-2); }
+  .row .v small { display:block; color:var(--muted); font-size:11px; margin-top:2px; }
+  .row .v.path {
+    display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; font-size:12px;
+  }
+  .row .v.path .node {
+    background:var(--bg-2); border:1px solid var(--rule-soft);
+    padding:2px 7px; font-size:11.5px;
+  }
+  .row .v.path .node.you { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  .row .v.path .arrow { color:var(--muted-2); }
+
+  @media (max-width:380px) { .row { grid-template-columns:1fr; gap:2px; } }
+
+  /* ua */
+  .ua-line { font-size:12.5px; color:var(--ink); margin-bottom:6px; }
+  .ua-raw { font-size:11px; color:var(--muted); word-break:break-all; line-height:1.5; }
+
+  /* curl */
+  .curl {
+    background:var(--term-bg); color:var(--term-fg); padding:14px;
+    font-size:11.5px; line-height:1.85; overflow-x:auto;
+  }
+  .curl .row2 {
+    display:flex; flex-direction:column; gap:1px; padding:7px 8px;
+    border-top:1px dashed color-mix(in srgb, var(--term-fg) 18%, transparent);
+    margin:0 -8px;
+    cursor:copy;
+    transition:background 100ms ease;
+    position:relative;
+  }
+  .curl .row2:hover { background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  .curl .row2:first-child { border-top:0; }
+  .curl .row2.copied { background:color-mix(in srgb, var(--good) 22%, transparent); }
+  .curl .row2:hover .copy-hint { opacity:1; }
+  .copy-hint {
+    position:absolute; top:7px; right:8px;
+    font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase;
+    color:color-mix(in srgb, var(--term-fg) 55%, transparent);
+    opacity:0; transition:opacity 120ms ease;
+    pointer-events:none;
+  }
+  .curl .row2.copied .copy-hint { opacity:1; color:var(--good); }
+  .curl .cm { color:color-mix(in srgb, var(--term-fg) 50%, transparent); font-size:10.5px; letter-spacing:0.04em; }
+  .curl .cmd { white-space:nowrap; }
+  .curl .prompt { color:var(--accent); margin-right:6px; user-select:none; }
+  .curl .url {
+    color:var(--term-fg); border-bottom:1px solid color-mix(in srgb, var(--term-fg) 25%, transparent);
+    text-underline-offset:3px; cursor:pointer; padding-bottom:1px;
+  }
+  .curl .url:hover { border-bottom-color:var(--term-fg); color:var(--accent); }
+  .curl .qs { color:var(--accent); }
+
+  /* disclosure */
+  .disclosure { background:var(--surface); border:1px solid var(--rule-soft); }
+  .disclosure summary {
+    list-style:none; cursor:pointer; padding:10px 12px;
+    display:flex; align-items:center; gap:10px;
+    font-size:11.5px; font-weight:600;
+  }
+  .disclosure summary::-webkit-details-marker { display:none; }
+  .disclosure summary .chev { transition:transform 120ms ease; color:var(--muted); }
+  .disclosure[open] summary .chev { transform:rotate(90deg); }
+  .disclosure summary .pill {
+    margin-left:auto; font-size:10px; letter-spacing:0.08em;
+    text-transform:uppercase; color:var(--muted);
+    border:1px solid var(--rule-soft); padding:2px 8px;
+  }
+  .disclosure .body { padding:0 12px 12px; font-size:11.5px; color:var(--ink-2); }
+  .disclosure .body .row3 {
+    display:grid; grid-template-columns:1fr auto; gap:12px; padding:6px 0;
+    border-top:1px dashed var(--rule-soft);
+  }
+  .disclosure .body .row3 .kind { color:var(--muted); font-size:10.5px; }
+
+  /* foot */
+  .foot {
+    margin-top:22px; padding-top:16px; border-top:1px solid var(--rule);
+    font-size:11px; color:var(--muted); line-height:1.6;
+  }
+  .foot p { margin-bottom:6px; }
+
+  /* toast */
+  .toast {
+    position:fixed; bottom:18px; left:50%;
+    transform:translateX(-50%) translateY(14px);
+    background:var(--ink); color:var(--bg);
+    font-size:11.5px; padding:9px 13px; letter-spacing:0.04em;
+    opacity:0; transition:transform 180ms ease, opacity 180ms ease;
+    pointer-events:none; z-index:50;
+  }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <p class="kicker">ip.unt1.com</p>
-    {{if .DBLoaded}}<span class="meta-load">VPN db loaded {{.DBLoaded}}</span>{{end}}
-  </header>
+<div class="sheet">
 
-  <h1 id="ip">{{.IP}}</h1>
-  {{if .IsLookup}}
-  <p class="summary">
-    Looking up <code>{{.IP}}</code>. Your own IP is <a href="/">{{.ReqIP}}</a>.
-    {{if .Version}}IPv{{if eq .Version "v4"}}4{{else}}6{{end}}.{{end}}
-  </p>
-  {{else}}
-  <p class="summary">
-    A small IP resolver. Browsers see this; <code>curl</code> and scripts get a plain address.
-    {{if .Version}}IPv{{if eq .Version "v4"}}4{{else}}6{{end}}{{end}} via <code>{{.Via}}</code>.
-  </p>
-  {{end}}
-
-  <div class="verdict {{if .VPN.VPN}}{{if .VPN.Tor}}warn{{else if .VPN.PrivacyProxy}}warn{{else}}bad{{end}}{{else}}good{{end}}">
-    <span class="badge">
-      {{if .VPN.Tor}}Tor exit
-      {{else if .VPN.PrivacyProxy}}Privacy proxy
-      {{else if .VPN.VPN}}VPN / Datacenter
-      {{else}}Looks residential{{end}}
-    </span>
-    <div>
-      {{if .VPN.Provider}}<strong>Provider:</strong> {{.VPN.Provider}}{{end}}
-      {{if .VPN.Source}}<span class="meta-load"> · {{.VPN.Source}}</span>{{end}}
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span><span>ip.unt1.com</span></div>
+    <div class="meta">
+      {{if not .IsLookup}}<span id="rtc-summary" class="rtc-summary" title="WebRTC ICE candidate leak probe — running"><span class="rtc-led"></span><span id="rtc-summary-text">rtc …</span></span><span class="sep">·</span>{{end}}
+      {{if .DBLoaded}}<span title="{{.DBLoaded}}" data-rel="{{.DBLoaded}}">vpn db {{.DBLoaded}}</span><span class="sep">·</span>{{end}}
+      <div class="theme-switch" role="radiogroup" aria-label="Theme">
+        <button data-key="auto" title="Auto (system)" aria-label="Auto"><span class="swatch"></span></button>
+        <button data-key="paper" title="Paper" aria-label="Paper" style="--sw-ink:#1a1a17"><span class="swatch" style="background:#f5f1e8"></span></button>
+        <button data-key="light" title="Light" aria-label="Light" style="--sw-ink:#0e1015"><span class="swatch" style="background:#f7f7f8"></span></button>
+        <button data-key="slate" title="Slate" aria-label="Slate" style="--sw-ink:#ecedf2"><span class="swatch" style="background:#181b22"></span></button>
+        <button data-key="terminal" title="Terminal" aria-label="Terminal" style="--sw-ink:#7be07b"><span class="swatch" style="background:#0c100c"></span></button>
+      </div>
     </div>
-    {{if .VPN.Reasons}}
-    <ul>
-      {{range .VPN.Reasons}}<li>{{.}}</li>{{end}}
-    </ul>
-    {{end}}
   </div>
 
-  <section class="grid" aria-label="Request details">
-    <div class="tile">
-      <strong>Country</strong>
-      <span>{{if .Country}}{{.CountryFlag}} {{.Country}}{{else}}—{{end}}</span>
+  <section class="hero">
+    <div class="label">
+      <span>{{if .IsLookup}}looking up{{else}}your public address{{end}}</span>
+      {{if .Version}}<span class="v">IPv{{if eq .Version "v4"}}4{{else}}6{{end}}</span>{{end}}
     </div>
-    <div class="tile">
-      <strong>ASN</strong>
-      <span>{{if .ASN}}AS{{.ASN}}{{else}}—{{end}}</span>
+    <div class="ip" id="ip" title="tap to copy">{{range .IPParts}}{{if .Sep}}<span class="sep">{{.V}}</span>{{else}}<span>{{.V}}</span>{{end}}{{end}}</div>
+    {{if .IsLookup}}
+    <div class="lookup-note">3rd-party lookup. Your own IP is <a href="/">{{.ReqIP}}</a>.</div>
+    {{end}}
+
+    <div class="verdict {{.Verdict.Tone}}" role="status" aria-label="Verdict: {{.Verdict.Stamp}}">
+      <span class="v-stamp"><span class="led"></span>{{.Verdict.Stamp}}</span>
+      <span class="v-body">
+        <span class="what">{{.Verdict.What}}</span>
+        {{if .Verdict.Src}}<span class="src">· {{.Verdict.Src}}</span>{{end}}
+      </span>
     </div>
-    <div class="tile big">
-      <strong>Network</strong>
-      <span>{{if .ASOrg}}{{.ASOrg}}{{else}}—{{end}}</span>
-    </div>
-    {{if .Prefix}}
-    <div class="tile" title="Announced prefix containing this IP">
-      <strong>Prefix</strong>
-      <span>{{.Prefix}}</span>
+    {{if and (ne .Verdict.Tone "good") .VPN.Reasons}}
+    <div class="verdict-detail">
+      <ul>{{range .VPN.Reasons}}<li>{{.}}</li>{{end}}</ul>
     </div>
     {{end}}
-    {{if .RIR}}
-    <div class="tile" title="Regional Internet Registry">
-      <strong>RIR</strong>
-      <span>{{.RIR}}{{if .Allocated}} · {{.Allocated}}{{end}}</span>
-    </div>
-    {{end}}
-    <div class="tile big">
-      <strong>Reverse DNS</strong>
-      <span>{{if .Reverse}}{{.Reverse}}{{else}}—{{end}}</span>
-    </div>
-    {{if and .Colo (not .IsLookup)}}
-    <div class="tile" title="IATA code of the Cloudflare datacenter that handled this request">
-      <strong>CF Colo</strong>
-      <span>{{.Colo}}</span>
-    </div>
-    {{end}}
-    {{if and .Ray (not .IsLookup)}}
-    <div class="tile">
-      <strong>Cloudflare Ray</strong>
-      <span>{{.Ray}}</span>
-    </div>
-    {{end}}
-    {{if .UAPretty}}
-    <div class="tile big" title="Parsed from Sec-CH-UA / Sec-CH-UA-Platform">
-      <strong>Browser</strong>
-      <span>{{.UAPretty}}</span>
-    </div>
-    {{end}}
-    <div class="tile big">
-      <strong>User agent</strong>
-      <span id="ua">{{.UA}}</span>
+
+    <div class="actions">
+      <button class="btn primary" id="copy" type="button">copy IP</button>
+      <a class="btn" href="#cli">↓ API &amp; CLI</a>
     </div>
   </section>
 
-  <div class="actions">
-    <button id="copy" type="button">Copy IP</button>
-    <a class="button secondary" href="/json{{if .IsLookup}}?ip={{.IP}}{{end}}">JSON</a>
-    <a class="button secondary" href="/vpn{{if .IsLookup}}?ip={{.IP}}{{end}}">VPN verdict</a>
-    <a class="button secondary" href="/trace">Trace</a>
-    <a class="button secondary" href="/headers">Headers</a>
-    <a class="button secondary" href="/all{{if .IsLookup}}?ip={{.IP}}{{end}}">Plain debug</a>
-    {{if not .IsLookup}}
-    <a class="button secondary" href="/json?format=yaml">YAML</a>
-    {{end}}
-  </div>
+  <section class="block">
+    <div class="block-head"><span class="n">01</span><span>where &amp; who</span><span class="rule"></span><span class="aside">geo · network</span></div>
+    <div class="primary">
+      <div class="cell">
+        <div class="k">country</div>
+        <div class="v">
+          {{if .Country}}
+            {{if .CountryFlag}}<span class="flag">{{.CountryFlag}}</span>{{end}}{{.Country}}
+          {{else}}<span style="color:var(--muted-2)">—</span>{{end}}
+        </div>
+      </div>
+      <div class="cell">
+        <div class="k">asn</div>
+        <div class="v">{{if .ASN}}<span title="Origin AS resolved via Team Cymru DNS whois (origin.asn.cymru.com)" style="cursor:help;border-bottom:1px dotted var(--muted-2)">AS{{.ASN}}</span>{{else}}<span style="color:var(--muted-2)">—</span>{{end}}</div>
+      </div>
+      <div class="cell full tall">
+        <div class="k">network</div>
+        <div class="v">{{if .ASOrg}}{{.ASOrg}}{{else}}<span style="color:var(--muted-2)">—</span>{{end}}</div>
+      </div>
+    </div>
+  </section>
 
-  <details>
-    <summary>WebRTC leak check</summary>
-    <div class="body" id="webrtc">Running…</div>
-  </details>
+  <section class="block">
+    <div class="block-head"><span class="n">02</span><span>routing</span><span class="rule"></span><span class="aside">{{if .IsLookup}}registry data{{else}}how this request reached us{{end}}</span></div>
+    <div class="rows">
+      {{if not .IsLookup}}
+      <div class="row">
+        <div class="k">path</div>
+        <div class="v path">
+          <span class="node you">{{if .CountryFlag}}{{.CountryFlag}} {{end}}you</span>
+          <span class="arrow">→</span>
+          <span class="node">{{if .ColoFlag}}{{.ColoFlag}} {{end}}CF · {{if .ColoCity}}{{.ColoCity}}{{else}}{{.Colo}}{{end}}</span>
+          <span class="arrow">→</span>
+          <span class="node">ipunt1</span>
+        </div>
+      </div>
+      {{end}}
+      <div class="row">
+        <div class="k">prefix</div>
+        <div class="v">{{if .Prefix}}{{.Prefix}}{{else}}<span class="dim">—</span>{{end}}</div>
+      </div>
+      <div class="row">
+        <div class="k">rir</div>
+        <div class="v">
+          {{if .RIR}}{{.RIR}}{{else}}<span class="dim">—</span>{{end}}
+          {{if .Allocated}}<small>allocated {{.Allocated}}</small>{{end}}
+        </div>
+      </div>
+      <div class="row">
+        <div class="k">reverse</div>
+        <div class="v">{{if .Reverse}}{{.Reverse}}{{else}}<span class="dim">— no PTR record</span>{{end}}</div>
+      </div>
+      {{if and .Ray (not .IsLookup)}}
+      <div class="row">
+        <div class="k">cf ray</div>
+        <div class="v" style="font-size:11.5px;word-break:break-all">
+          {{.Ray}}
+          {{if .ColoCity}}<small>{{if .ColoFlag}}{{.ColoFlag}} {{end}}{{.ColoCity}}{{if .ColoCountry}}, {{.ColoCountry}}{{end}} · IATA {{.Colo}}</small>{{else if .Colo}}<small>colo {{.Colo}}</small>{{end}}
+        </div>
+      </div>
+      {{end}}
+    </div>
+  </section>
 
-  <pre><code>$ curl https://ip.unt1.com                   # plain IP
-$ curl https://ip.unt1.com/json              # full JSON
-$ curl https://ip.unt1.com/json?format=yaml  # YAML
-$ curl https://ip.unt1.com/vpn               # VPN verdict only
-$ curl https://ip.unt1.com/trace             # Cloudflare-style key=value
-$ curl https://ip.unt1.com/all               # all fields, plain text
-$ curl https://ip.unt1.com/json?ip=8.8.8.8   # look up another IP</code></pre>
+  {{if not .IsLookup}}
+  <section class="block">
+    <div class="block-head"><span class="n">03</span><span>browser</span><span class="rule"></span><span class="aside">parsed from sec-ch-ua</span></div>
+    <div class="ua-line">{{if .UAPretty}}{{.UAPretty}}{{else}}<span style="color:var(--muted-2)">— no client hints sent</span>{{end}}</div>
+    <div class="ua-raw">{{.UA}}</div>
+  </section>
+  {{end}}
 
-  <footer>
-    Source: <a href="https://github.com/faeton/ip.unt1.com">github.com/faeton/ip.unt1.com</a> ·
-    No logging beyond Caddy access logs · ASN via Team Cymru DNS whois ·
-    VPN data: Mullvad, NordVPN, iVPN, AirVPN public APIs + Tor exit list + datacenter ASNs.
+  {{if not .IsLookup}}
+  <section class="block">
+    <div class="block-head"><span class="n">04</span><span>browser leakage</span><span class="rule"></span><span class="aside">webrtc ice candidates</span></div>
+    <details class="disclosure" id="webrtc-d">
+      <summary>
+        <span class="chev">▸</span>
+        webrtc leak check
+        <span class="pill" id="webrtc-pill">probing…</span>
+      </summary>
+      <div class="body" id="webrtc-body">
+        <div style="color:var(--muted)">What an arbitrary page could harvest from your browser via RTCPeerConnection ICE candidates.</div>
+      </div>
+    </details>
+  </section>
+  {{end}}
+
+  <section class="block" id="cli">
+    <div class="block-head"><span class="n">{{if .IsLookup}}03{{else}}05{{end}}</span><span>cli surface</span><span class="rule"></span><span class="aside">URL opens · row copies</span></div>
+    <div class="curl">
+      <div class="row2" data-curl="curl https://ip.unt1.com/"><div class="cm">// plain IP, newline-terminated — what scripts want</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/">https://ip.unt1.com/</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/json"><div class="cm">// full JSON: ip, country, asn, prefix, vpn verdict, ua…</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/json">https://ip.unt1.com/json</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/json?format=yaml"><div class="cm">// same payload as /json, YAML-encoded</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/json?format=yaml">https://ip.unt1.com/json<span class="qs">?format=yaml</span></a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/vpn"><div class="cm">// just the VPN/proxy verdict (provider, source, reasons)</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/vpn">https://ip.unt1.com/vpn</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/trace"><div class="cm">// Cloudflare-style key=value, deterministic order</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/trace">https://ip.unt1.com/trace</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/all"><div class="cm">// every field as plain key: value lines</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/all">https://ip.unt1.com/all</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/headers"><div class="cm">// echo back the request headers we received</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/headers">https://ip.unt1.com/headers</a></div><span class="copy-hint">copy</span></div>
+      <div class="row2" data-curl="curl https://ip.unt1.com/json?ip=8.8.8.8"><div class="cm">// look up an arbitrary IP (path or ?ip= both work)</div><div class="cmd"><span class="prompt">$</span>curl <a class="url" href="/json?ip=8.8.8.8">https://ip.unt1.com/json<span class="qs">?ip=8.8.8.8</span></a></div><span class="copy-hint">copy</span></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>Tiny IP echo + VPN/proxy detection. Single static Go binary behind Caddy + Cloudflare. ASN data via Team Cymru DNS whois.</p>
+    <p>No logging beyond Caddy access logs · <a href="https://github.com/faeton/ip.unt1.com">github.com/faeton/ip.unt1.com</a> · MIT</p>
   </footer>
-</main>
+
+  <div class="toast" id="toast"></div>
+</div>
 
 <script>
-  // Copy IP button.
-  document.getElementById('copy').addEventListener('click', async () => {
-    const btn = document.getElementById('copy');
-    const ip = document.getElementById('ip').textContent.trim();
-    try {
-      await navigator.clipboard.writeText(ip);
-      btn.textContent = 'Copied';
-    } catch {
-      btn.textContent = 'Copy failed';
+  // ---- theme switcher ----
+  (function () {
+    var html = document.documentElement;
+    var current = html.getAttribute('data-theme') || 'auto';
+    var btns = document.querySelectorAll('.theme-switch button');
+    function paint() {
+      btns.forEach(function (b) {
+        b.classList.toggle('active', b.dataset.key === current);
+        b.setAttribute('aria-pressed', String(b.dataset.key === current));
+      });
     }
-    setTimeout(() => { btn.textContent = 'Copy IP'; }, 1400);
-  });
+    btns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        current = b.dataset.key;
+        html.setAttribute('data-theme', current);
+        try { localStorage.setItem('theme', current); } catch (_) {}
+        paint();
+      });
+    });
+    paint();
+  })();
 
-  // WebRTC leak check. Browsers can expose local + public IPs via the
-  // WebRTC API even behind a VPN; this block shows what an arbitrary
-  // page could harvest from your browser right now.
-  //
-  // Parse candidate strings by SDP grammar rather than regex-fishing:
-  //   candidate:<foundation> <component> <transport> <priority>
-  //             <address> <port> typ <type> [...]
-  // Address is the 5th whitespace-separated token (index 4).
-  (async () => {
-    const out = document.getElementById('webrtc');
-    if (!window.RTCPeerConnection) { out.textContent = 'RTCPeerConnection unavailable.'; return; }
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
-    const found = new Map(); // address -> type (host/srflx/relay)
+  // ---- relative time on db loaded ----
+  (function () {
+    var el = document.querySelector('[data-rel]');
+    if (!el) return;
+    var d = new Date(el.dataset.rel);
+    if (isNaN(d.getTime())) return;
+    function rel() {
+      var s = (Date.now() - d.getTime()) / 1000;
+      if (s < 60) return 'just now';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
+    }
+    el.textContent = 'vpn db ' + rel();
+  })();
 
-    const isIPv4 = s => /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/.test(s);
-    const isIPv6 = s => s.includes(':') && /^[0-9a-f:.%]+$/i.test(s) && s.length >= 3;
-    const classify = addr => {
-      if (isIPv4(addr)) {
-        if (/^10\./.test(addr) || /^192\.168\./.test(addr) ||
-            /^172\.(1[6-9]|2\d|3[01])\./.test(addr) ||
-            /^127\./.test(addr) || /^169\.254\./.test(addr)) return 'private';
+  // ---- click-to-copy on curl rows (URL link still navigates) ----
+  (function () {
+    var toast = document.getElementById('toast');
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(function () { toast.classList.remove('show'); }, 1500);
+    }
+    document.querySelectorAll('.curl .row2').forEach(function (row) {
+      row.addEventListener('click', async function (e) {
+        if (e.target.closest('a')) return; // URL clicks navigate
+        var cmd = row.dataset.curl;
+        try {
+          await navigator.clipboard.writeText(cmd);
+          row.classList.add('copied');
+          var hint = row.querySelector('.copy-hint');
+          if (hint) hint.textContent = 'copied';
+          showToast('copied: ' + cmd);
+          setTimeout(function () {
+            row.classList.remove('copied');
+            if (hint) hint.textContent = 'copy';
+          }, 1200);
+        } catch { showToast('copy failed'); }
+      });
+    });
+  })();
+
+  // ---- copy IP (button + tap on hero) ----
+  (function () {
+    var ipEl = document.getElementById('ip');
+    var btn = document.getElementById('copy');
+    var toast = document.getElementById('toast');
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(function () { toast.classList.remove('show'); }, 1500);
+    }
+    async function copy() {
+      var ip = ipEl.textContent.trim();
+      try { await navigator.clipboard.writeText(ip); showToast('copied ' + ip); }
+      catch { showToast('copy failed'); }
+    }
+    btn.addEventListener('click', copy);
+    ipEl.addEventListener('click', copy);
+  })();
+
+  // ---- WebRTC leak probe (auto-run, mirrored in topbar) ----
+  (function () {
+    var d = document.getElementById('webrtc-d');
+    if (!d) return; // hidden in lookup mode
+    var pill = document.getElementById('webrtc-pill');
+    var body = document.getElementById('webrtc-body');
+    var sum = document.getElementById('rtc-summary');
+    var sumText = document.getElementById('rtc-summary-text');
+    function setStatus(state, pillText, summaryText, summaryTitle) {
+      pill.textContent = pillText;
+      if (sum) {
+        sum.dataset.state = state;
+        sumText.textContent = summaryText;
+        sum.title = summaryTitle;
+      }
+    }
+    if (!window.RTCPeerConnection) {
+      setStatus('na', 'n/a', 'rtc n/a', 'WebRTC unavailable in this browser');
+      body.innerHTML = '<div>RTCPeerConnection unavailable.</div>';
+      return;
+    }
+    setStatus('probing', 'probing', 'rtc probing', 'WebRTC ICE candidate leak probe — running');
+    body.innerHTML = '<div style="color:var(--muted)">gathering candidates…</div>';
+    var pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
+    var found = new Map();
+    var isV4 = function (s) { return /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/.test(s); };
+    var isV6 = function (s) { return s.indexOf(':') !== -1 && /^[0-9a-f:.%]+$/i.test(s) && s.length >= 3; };
+    function classify(a) {
+      if (isV4(a)) {
+        if (/^10\./.test(a) || /^192\.168\./.test(a) || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^127\./.test(a) || /^169\.254\./.test(a)) return 'private';
         return 'public';
       }
-      if (isIPv6(addr)) {
-        if (/^fe80:/i.test(addr) || /^fc/i.test(addr) || /^fd/i.test(addr) || addr === '::1') return 'private';
+      if (isV6(a)) {
+        if (/^fe80:/i.test(a) || /^fc/i.test(a) || /^fd/i.test(a) || a === '::1') return 'private';
         return 'public';
       }
       return null;
-    };
-
-    pc.onicecandidate = e => {
+    }
+    pc.onicecandidate = function (e) {
       if (!e.candidate || !e.candidate.candidate) return;
-      const parts = e.candidate.candidate.replace(/^candidate:/, '').split(/\s+/);
+      var parts = e.candidate.candidate.replace(/^candidate:/, '').split(/\s+/);
       if (parts.length < 8) return;
-      const address = parts[4];
-      const typIdx = parts.indexOf('typ');
-      const candType = typIdx >= 0 ? parts[typIdx + 1] : '?';
-      // Modern Chrome returns mDNS `.local` placeholder hostnames instead of
-      // raw private IPs — that's a feature, surface it as such.
-      if (/\.local$/i.test(address)) {
-        found.set(address, 'mdns (' + candType + ')');
-        return;
-      }
-      const cls = classify(address);
-      if (!cls) return;
-      found.set(address, cls + ' (' + candType + ')');
+      var address = parts[4];
+      var ti = parts.indexOf('typ');
+      var ct = ti >= 0 ? parts[ti + 1] : '?';
+      if (/\.local$/i.test(address)) { found.set(address, 'mdns (' + ct + ')'); return; }
+      var c = classify(address); if (!c) return;
+      found.set(address, c + ' (' + ct + ')');
     };
     pc.createDataChannel('x');
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-    } catch (err) {
-      out.textContent = 'WebRTC failed: ' + err.message;
-      return;
-    }
-    setTimeout(() => {
+    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(function (err) {
+      setStatus('na', 'error', 'rtc error', 'WebRTC probe failed: ' + err.message);
+      body.innerHTML = '<div>webrtc failed: ' + err.message + '</div>';
+    });
+    var detectedIP = (document.getElementById('ip').textContent || '').trim();
+    setTimeout(function () {
       pc.close();
-      if (found.size === 0) {
-        out.textContent = 'No candidates surfaced (mDNS-protected or blocked).';
+      var entries = Array.from(found.entries());
+      // A "leak" is a *public* candidate whose address differs from the
+      // egress IP the server already saw. Same-IP candidates aren't a
+      // leak — they just reconfirm what's already public.
+      var annotated = entries.map(function (e) {
+        var addr = e[0], kind = e[1];
+        var tag = '';
+        if (/^public/.test(kind)) {
+          tag = (addr === detectedIP) ? 'matches detected' : 'differs — leak';
+        } else if (/^mdns/.test(kind)) {
+          tag = 'mdns-protected';
+        } else if (/^private/.test(kind)) {
+          tag = 'local network';
+        }
+        return { addr: addr, kind: kind, tag: tag };
+      });
+      var leaks = annotated.filter(function (a) { return a.tag === 'differs — leak'; });
+      if (entries.length === 0) {
+        setStatus('ok', 'no candidates', 'rtc clean', 'No WebRTC ICE candidates surfaced — mDNS-protected or blocked');
+        body.innerHTML = '<div style="color:var(--muted)">no candidates surfaced — mDNS-protected or blocked.</div>';
         return;
       }
-      out.innerHTML = [...found.entries()]
-        .map(([addr, kind]) => `<div>${addr} <span style="color:var(--muted)">— ${kind}</span></div>`)
-        .join('');
+      if (leaks.length > 0) {
+        setStatus('leak', leaks.length + ' leak' + (leaks.length > 1 ? 's' : ''),
+          'rtc ' + leaks.length + ' leaked',
+          leaks.length + ' public IP(s) differ from egress ' + detectedIP + ' — real client IP exposed');
+      } else {
+        setStatus('ok', 'no leak', 'rtc clean',
+          entries.length + ' candidate(s) — none differ from egress ' + detectedIP);
+      }
+      body.innerHTML = annotated.map(function (a) {
+        var color = a.tag === 'differs — leak' ? 'var(--bad)' :
+                    a.tag === 'matches detected' ? 'var(--good)' : 'var(--muted)';
+        return '<div class="row3"><div>' + a.addr +
+          ' <span style="color:' + color + ';font-size:10.5px;letter-spacing:0.04em">· ' + a.tag + '</span></div>' +
+          '<div class="kind">' + a.kind + '</div></div>';
+      }).join('');
     }, 1500);
   })();
 </script>
