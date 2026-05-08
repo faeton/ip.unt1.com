@@ -57,6 +57,7 @@ type server struct {
 	cfg    config
 	asn    *asnResolver
 	vpn    *vpnDB
+	whois  *whoisCache
 	logger *slog.Logger
 	// loadedAt is set when the VPN DB has its first successful refresh.
 	loadedAt atomic.Pointer[time.Time]
@@ -82,6 +83,7 @@ func main() {
 		cfg:    cfg,
 		asn:    newASNResolver(logger),
 		vpn:    newVPNDB(logger),
+		whois:  newWhoisCache(),
 		logger: logger,
 	}
 
@@ -360,6 +362,8 @@ func (s *server) gather(r *http.Request) dataset {
 	target, targetRaw, isLookup := s.targetIP(r, info)
 	asn := s.asn.Lookup(r.Context(), target)
 	verdict := s.vpn.Check(target, asn)
+	reverse := lookupReverse(r.Context(), target)
+	verdict = s.vpn.Augment(r.Context(), verdict, target, asn, reverse, s.whois)
 
 	country := info.Country
 	if isLookup || country == "" {
@@ -384,7 +388,7 @@ func (s *server) gather(r *http.Request) dataset {
 		Prefix:    asn.Prefix,
 		RIR:       strings.ToLower(asn.RIR),
 		Allocated: asn.Allocated,
-		Reverse:   lookupReverse(r.Context(), target),
+		Reverse:   reverse,
 		UA:        info.UA,
 		UAPretty:  hints.Pretty(),
 		Via:       info.Via,
@@ -736,12 +740,21 @@ func sourceLabel(s string) string {
 	switch s {
 	case "ip-list":
 		return "matched published server IP"
+	case "ip-prefix":
+		return "in published VPN provider's prefix"
 	case "asn":
 		return "matched datacenter ASN"
 	case "asn+ip-list":
 		return "matched server IP + datacenter ASN"
 	case "cidr":
 		return "matched egress CIDR"
+	case "rdns":
+		return "rDNS matches VPN provider"
+	case "whois":
+		return "WHOIS identifies VPN provider"
+	}
+	if strings.Contains(s, "+") {
+		return "multiple sources: " + s
 	}
 	return s
 }

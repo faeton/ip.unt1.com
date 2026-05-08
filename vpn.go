@@ -44,10 +44,31 @@ type cidrEntry struct {
 type vpnSnapshot struct {
 	// IP → provider tag ("mullvad", "nordvpn", "ivpn", "airvpn", "tor")
 	ips map[netip.Addr]string
+	// /24 (v4) or /48 (v6) → provider tag, derived from `ips`.
+	// Catches egress IPs that sit next to a published connect IP — common
+	// for NordVPN, where the API exposes connect addresses but the actual
+	// public-facing egress sits on the same /24. Tor is deliberately
+	// excluded; neighboring IPs of a Tor exit are not themselves exits.
+	ipNets map[netip.Prefix]string
 	// CIDR ranges (iCloud Private Relay etc.) — small list, linear scan.
 	cidrs []cidrEntry
 	// ASN → label for known datacenter/VPN-rental ASNs.
 	dcASN map[int]string
+}
+
+// netPrefixForIP returns /24 for v4, /48 for v6 — the granularity at which
+// VPN operators typically receive contiguous allocations.
+func netPrefixForIP(ip netip.Addr) (netip.Prefix, bool) {
+	ip = normalizeIP(ip)
+	bits := 24
+	if ip.Is6() && !ip.Is4In6() {
+		bits = 48
+	}
+	pfx, err := ip.Prefix(bits)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return pfx.Masked(), true
 }
 
 type vpnDB struct {
@@ -63,8 +84,9 @@ func newVPNDB(logger *slog.Logger) *vpnDB {
 	}
 	// Seed with an empty snapshot so Check() before first refresh is safe.
 	empty := &vpnSnapshot{
-		ips:   map[netip.Addr]string{},
-		dcASN: datacenterASNs(),
+		ips:    map[netip.Addr]string{},
+		ipNets: map[netip.Prefix]string{},
+		dcASN:  datacenterASNs(),
 	}
 	d.snap.Store(empty)
 	return d
@@ -93,6 +115,16 @@ func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 			v.Provider = ""
 			v.Reasons = []string{"matched Tor exit relay list"}
 		}
+	} else if pfx, ok := netPrefixForIP(ip); ok {
+		// No exact hit — try the /24 (or /48) neighborhood. Many VPN
+		// operators (NordVPN especially) publish connect IPs while
+		// egressing from adjacent addresses in the same allocation.
+		if provider, hit := snap.ipNets[pfx]; hit && provider != "multi" {
+			v.VPN = true
+			v.Provider = provider
+			v.Source = "ip-prefix"
+			v.Reasons = append(v.Reasons, "in published "+provider+" prefix "+pfx.String())
+		}
 	}
 
 	for _, c := range snap.cidrs {
@@ -113,16 +145,52 @@ func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 	if asn.ASN != 0 {
 		if label, ok := snap.dcASN[asn.ASN]; ok {
 			v.VPN = true
-			if v.Source == "ip-list" {
-				v.Source = "asn+ip-list"
-			} else {
-				v.Source = "asn"
-			}
+			v.Source = appendSource(v.Source, "asn")
 			v.Reasons = append(v.Reasons, "ASN AS"+itoa(asn.ASN)+" ("+label+") is a known hosting/VPN-rental network")
 		}
 	}
 
 	return v
+}
+
+// Augment layers rDNS and WHOIS signals onto an existing verdict. rDNS is
+// free (the lookup already happened in the request path) and runs always.
+// WHOIS is gated: only when the ASN/prefix layers already raised a flag
+// without identifying the brand — so we don't port-43-bomb every clean
+// residential visitor — or when a strong rDNS hit suggests the IP is worth
+// confirming. Cached for 24h per IP.
+func (d *vpnDB) Augment(ctx context.Context, v vpnVerdict, ip netip.Addr, asn asnInfo, rdns string, wc *whoisCache) vpnVerdict {
+	if v.Tor || v.PrivacyProxy {
+		return v
+	}
+	if label, ok := checkRDNSHostname(rdns); ok {
+		v.VPN = true
+		if v.Provider == "" {
+			v.Provider = label
+		}
+		v.Source = appendSource(v.Source, "rdns")
+		v.Reasons = append(v.Reasons, "rDNS "+rdns+" matches "+label)
+	}
+	if wc != nil && v.VPN && v.Provider == "" && asn.ASN != 0 {
+		if label, ok := wc.Lookup(ctx, ip, asn.RIR); ok {
+			v.Provider = label
+			v.Source = appendSource(v.Source, "whois")
+			v.Reasons = append(v.Reasons, "WHOIS identifies "+label)
+		}
+	}
+	return v
+}
+
+func appendSource(s, more string) string {
+	if s == "" {
+		return more
+	}
+	for _, p := range strings.Split(s, "+") {
+		if p == more {
+			return s
+		}
+	}
+	return s + "+" + more
 }
 
 // runRefreshLoop loads provider lists immediately, then re-loads every 6h.
@@ -229,10 +297,30 @@ func (d *vpnDB) refresh(ctx context.Context) error {
 		}
 	}
 
+	// Derive /24-or-/48 prefix map from the IP-list. Skip Tor (neighbors
+	// of an exit are not themselves exits). If two providers share a
+	// prefix, mark "multi" so Check() ignores it rather than guessing.
+	combinedNets := make(map[netip.Prefix]string, len(combinedIPs))
+	for ip, prov := range combinedIPs {
+		if prov == "tor" {
+			continue
+		}
+		pfx, ok := netPrefixForIP(ip)
+		if !ok {
+			continue
+		}
+		if existing, present := combinedNets[pfx]; present && existing != prov {
+			combinedNets[pfx] = "multi"
+		} else if !present {
+			combinedNets[pfx] = prov
+		}
+	}
+
 	d.snap.Store(&vpnSnapshot{
-		ips:   combinedIPs,
-		cidrs: combinedCIDRs,
-		dcASN: datacenterASNs(),
+		ips:    combinedIPs,
+		ipNets: combinedNets,
+		cidrs:  combinedCIDRs,
+		dcASN:  datacenterASNs(),
 	})
 
 	if successes == 0 && totalJobs > 0 {
@@ -510,5 +598,11 @@ func datacenterASNs() map[int]string {
 		36351: "SoftLayer / IBM Cloud",
 		// Datapacket — major VPN-rental upstream (NordVPN, ExpressVPN partner).
 		212238: "Datapacket / CDN77",
+		// Internetbolaget / Packethub — hosts NordVPN, OVPN, others (SE).
+		51747: "Internetbolaget / Packethub",
+		// Stark Industries — common VPN/proxy egress.
+		44477: "Stark Industries",
+		// Netrouting (NL) — AirVPN egress, also used by other VPN providers.
+		6206: "Netrouting",
 	}
 }
