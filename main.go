@@ -41,10 +41,37 @@ import (
 	"time"
 )
 
-//go:embed web/index.html
+//go:embed web/index.html web/index-swiss.html
 var webFS embed.FS
 
-var indexTpl = template.Must(template.ParseFS(webFS, "web/index.html"))
+var (
+	indexTpl      = template.Must(template.ParseFS(webFS, "web/index.html"))
+	indexSwissTpl = template.Must(template.ParseFS(webFS, "web/index-swiss.html"))
+)
+
+// pickStyle returns the template the user wants. Query ?style=… wins over
+// cookie and is also persisted, so a shared link forces that design once.
+func pickStyle(w http.ResponseWriter, r *http.Request) *template.Template {
+	style := ""
+	if q := r.URL.Query().Get("style"); q != "" {
+		style = q
+	} else if c, err := r.Cookie("style"); err == nil {
+		style = c.Value
+	}
+	switch style {
+	case "swiss":
+		if r.URL.Query().Get("style") != "" {
+			http.SetCookie(w, &http.Cookie{Name: "style", Value: "swiss", Path: "/", MaxAge: 60 * 60 * 24 * 365, SameSite: http.SameSiteLaxMode})
+		}
+		return indexSwissTpl
+	case "classic":
+		if r.URL.Query().Get("style") != "" {
+			http.SetCookie(w, &http.Cookie{Name: "style", Value: "classic", Path: "/", MaxAge: 60 * 60 * 24 * 365, SameSite: http.SameSiteLaxMode})
+		}
+		return indexTpl
+	}
+	return indexTpl
+}
 
 type config struct {
 	addr           string
@@ -429,7 +456,7 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if err := indexTpl.Execute(w, view); err != nil {
+	if err := pickStyle(w, r).Execute(w, view); err != nil {
 		s.logger.Error("template", "err", err)
 	}
 }

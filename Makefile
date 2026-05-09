@@ -1,5 +1,5 @@
 BIN     := bin/ipunt1
-SRC     := $(shell find . -name '*.go') web/index.html
+SRC     := $(shell find . -name '*.go') web/index.html web/index-swiss.html
 HOST    ?= on1
 REMOTE_BIN := /usr/local/bin/ipunt1
 LDFLAGS := -s -w

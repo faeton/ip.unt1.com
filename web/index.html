@@ -114,6 +114,14 @@
   .rtc-summary[data-state="na"] .rtc-led      { background:var(--muted-2); }
   @keyframes rtc-pulse { 0%,100% { opacity:1 } 50% { opacity:0.35 } }
 
+  /* design swap */
+  .design-swap {
+    font:inherit; font-size:10px; letter-spacing:0.1em; text-transform:uppercase;
+    background:transparent; color:var(--ink); border:1px solid var(--rule-soft);
+    padding:4px 8px; cursor:pointer; font-weight:600;
+  }
+  .design-swap:hover { background:var(--bg-2); border-color:var(--ink); }
+
   /* theme switch */
   .theme-switch { display:inline-flex; gap:4px; padding:2px; border:1px solid var(--rule-soft); background:var(--bg-2); }
   .theme-switch button {
@@ -346,6 +354,7 @@
     <div class="meta">
       {{if not .IsLookup}}<span id="rtc-summary" class="rtc-summary" title="WebRTC ICE candidate leak probe — running"><span class="rtc-led"></span><span id="rtc-summary-text">rtc …</span></span><span class="sep">·</span>{{end}}
       {{if .DBLoaded}}<span title="{{.DBLoaded}}" data-rel="{{.DBLoaded}}">vpn db {{.DBLoaded}}</span><span class="sep">·</span>{{end}}
+      <button class="design-swap" type="button" title="Try alternate Swiss design" onclick="document.cookie='style=swiss; max-age=31536000; path=/; samesite=lax'; location.reload();">swiss ↗</button>
       <div class="theme-switch" role="radiogroup" aria-label="Theme">
         <button data-key="auto" title="Auto (system)" aria-label="Auto"><span class="swatch"></span></button>
         <button data-key="paper" title="Paper" aria-label="Paper" style="--sw-ink:#1a1a17"><span class="swatch" style="background:#f5f1e8"></span></button>

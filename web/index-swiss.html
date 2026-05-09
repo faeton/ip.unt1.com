@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>{{.IP}} — ip.unt1.com</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#f0ede6;
+    --paper:#faf7f0;
+    --ink:#0a0a0a;
+    --ink-2:#2a2a2a;
+    --muted:#8a8479;
+    --muted-2:#b6b0a3;
+    --rule:#0a0a0a;
+    --rule-soft:#cfc8b8;
+    --accent:#ff3e00;
+    --good:#1f7a44;
+    --warn:#a86316;
+    --bad:#b32a2a;
+    --sans:'Inter', system-ui, sans-serif;
+    --mono:'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0e0e0c; --paper:#161613;
+      --ink:#f3eee0; --ink-2:#d6d1c1; --muted:#807a6c; --muted-2:#54503f;
+      --rule:#f3eee0; --rule-soft:#33302a;
+      --accent:#ff5a1f; --good:#6dd29c; --warn:#f0c46a; --bad:#ff7c7c;
+    }
+  }
+
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { background:var(--bg); color:var(--ink); }
+  body {
+    font-family:var(--sans);
+    line-height:1.25;
+    -webkit-font-smoothing:antialiased;
+    padding:clamp(20px, 4vw, 56px);
+    font-feature-settings:"ss01","cv11";
+  }
+  ::selection { background:var(--ink); color:var(--bg); }
+  a { color:inherit; text-underline-offset:3px; }
+
+  /* header */
+  header {
+    display:flex; justify-content:space-between; align-items:flex-end;
+    gap:24px; padding-bottom:clamp(10px, 1.2vw, 18px);
+    border-bottom:2px solid var(--rule);
+    flex-wrap:wrap;
+  }
+  .meta-top {
+    font-size:11px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.18em;
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  .meta-top .dot {
+    width:7px; height:7px; border-radius:50%;
+    background:var(--good);
+    box-shadow:0 0 0 2px color-mix(in srgb, var(--good) 22%, transparent);
+  }
+  .meta-top .sep { color:var(--muted-2); }
+  .meta-top .ver { color:var(--muted); font-weight:600; }
+  .design-swap {
+    font:700 10px/1 var(--sans); letter-spacing:0.18em; text-transform:uppercase;
+    background:transparent; color:var(--ink); border:1.5px solid var(--ink);
+    padding:6px 10px; cursor:pointer;
+  }
+  .design-swap:hover { background:var(--ink); color:var(--bg); }
+  .search {
+    width:min(320px, 56vw);
+    border-bottom:2px solid var(--rule);
+    padding:4px 0;
+  }
+  .search input {
+    width:100%; background:transparent; border:0; outline:0;
+    font:600 14px/1.2 var(--sans); color:var(--ink);
+    text-transform:uppercase; letter-spacing:0.04em;
+  }
+  .search input::placeholder { color:var(--muted-2); }
+
+  /* hero */
+  .hero {
+    margin:clamp(28px, 5vw, 60px) 0 clamp(20px, 3vw, 40px);
+    container-type:inline-size;
+  }
+  .hero .label {
+    font-size:11px; font-weight:700;
+    text-transform:uppercase; letter-spacing:0.2em;
+    color:var(--muted); margin-bottom:10px;
+    display:flex; gap:14px; align-items:baseline;
+  }
+  .hero .label .v {
+    font-size:10px; background:var(--ink); color:var(--bg);
+    padding:2px 7px; letter-spacing:0.12em;
+  }
+  .hero .ip {
+    font-weight:900;
+    line-height:0.9;
+    letter-spacing:-0.055em;
+    color:var(--ink); cursor:copy;
+    white-space:nowrap; overflow:hidden;
+    /* size auto-shrinks with container width; capped 200 for big screens */
+    font-size:clamp(28px, 12.5cqi, 200px);
+  }
+  .hero .ip.v6 { font-size:clamp(18px, 4.6cqi, 90px); }
+  .hero .ip .sep { color:var(--accent); }
+  .hero .lookup-note {
+    margin-top:14px; font-size:13px; color:var(--muted);
+  }
+  .hero .lookup-note a { font-weight:600; color:var(--ink); }
+
+  /* verdict */
+  .verdict {
+    margin-top:clamp(18px, 2.4vw, 28px);
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    border-top:2px solid var(--rule);
+    border-bottom:2px solid var(--rule);
+    padding:14px 0;
+  }
+  .stamp {
+    display:inline-flex; align-items:center; gap:8px;
+    background:var(--ink); color:var(--bg);
+    font-weight:900; font-size:clamp(18px, 2.6vw, 30px);
+    text-transform:uppercase; letter-spacing:0.04em;
+    padding:6px 14px;
+  }
+  .verdict.good .stamp { background:var(--good); }
+  .verdict.warn .stamp { background:var(--warn); }
+  .verdict.bad  .stamp { background:var(--accent); }
+  .stamp .led { width:8px; height:8px; border-radius:50%; background:currentColor; opacity:0.85; }
+  .verdict .what {
+    font-size:clamp(14px, 1.5vw, 18px); font-weight:600;
+  }
+  .verdict .src {
+    font-size:12px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:0.12em;
+  }
+  .verdict-detail {
+    margin-top:14px;
+    font-size:13px; color:var(--ink-2);
+    border:1px solid var(--rule-soft); padding:10px 14px;
+    background:var(--paper);
+  }
+  .verdict-detail ul { list-style:none; display:flex; flex-direction:column; gap:4px; }
+  .verdict-detail li::before { content:"› "; color:var(--accent); font-weight:700; }
+
+  /* grid */
+  .grid {
+    display:grid;
+    grid-template-columns:repeat(12, 1fr);
+    gap:clamp(16px, 2.4vw, 36px) clamp(20px, 3vw, 48px);
+    margin-top:clamp(28px, 4vw, 56px);
+  }
+  .section { grid-column:span 4; }
+  .section.span6 { grid-column:span 6; }
+  .section.span12 { grid-column:span 12; }
+  @media (max-width:900px) {
+    .section, .section.span6 { grid-column:span 6; }
+  }
+  @media (max-width:560px) {
+    .section, .section.span6 { grid-column:span 12; }
+  }
+
+  .section h2 {
+    font-size:11px; font-weight:800;
+    text-transform:uppercase; letter-spacing:0.22em;
+    border-top:1px solid var(--rule);
+    padding:10px 0 16px;
+    display:flex; justify-content:space-between; align-items:baseline;
+  }
+  .section h2 .n {
+    color:var(--muted-2); font-weight:600; letter-spacing:0.12em;
+  }
+
+  .data { margin-bottom:14px; }
+  .data:last-child { margin-bottom:0; }
+  .label {
+    display:block; font-size:10.5px; font-weight:600;
+    color:var(--muted); text-transform:uppercase;
+    letter-spacing:0.14em; margin-bottom:4px;
+  }
+  .value {
+    font-size:15px; font-weight:500; color:var(--ink);
+    overflow-wrap:anywhere;
+  }
+  .value.lg {
+    font-size:clamp(22px, 2.4vw, 30px);
+    font-weight:700; letter-spacing:-0.02em;
+    line-height:1.05;
+  }
+  .value.accent { color:var(--accent); }
+  .value .flag { font-size:1.15em; margin-right:8px; vertical-align:-2px; }
+  .value .small {
+    display:block; font-family:var(--mono);
+    font-size:11.5px; color:var(--muted);
+    margin-top:4px; letter-spacing:0;
+  }
+  .value .dim { color:var(--muted-2); }
+  .value.mono {
+    font-family:var(--mono); font-weight:500;
+    font-size:13px;
+  }
+
+  .path {
+    display:flex; flex-wrap:wrap; align-items:center;
+    gap:6px 10px; font-size:12px; font-family:var(--mono);
+  }
+  .path .node {
+    border:1px solid var(--rule); padding:3px 9px;
+  }
+  .path .node.you { background:var(--ink); color:var(--bg); border-color:var(--ink); }
+  .path .arrow { color:var(--accent); font-weight:700; }
+
+  .ua-pretty { font-size:14px; font-weight:500; margin-bottom:6px; }
+  .ua-raw { font-family:var(--mono); font-size:11px; color:var(--muted); }
+
+  /* curl */
+  .curl {
+    background:var(--ink); color:var(--paper);
+    font-family:var(--mono); font-size:12px; line-height:1.7;
+    padding:16px 18px; margin-top:8px;
+  }
+  .curl .row {
+    display:block; padding:5px 0;
+    border-top:1px dashed color-mix(in srgb, var(--paper) 22%, transparent);
+  }
+  .curl .row:first-child { border-top:0; }
+  .curl .cm { color:color-mix(in srgb, var(--paper) 50%, transparent); font-size:10.5px; }
+  .curl .prompt { color:var(--accent); margin-right:6px; }
+  .curl a {
+    color:var(--paper); text-decoration:none;
+    border-bottom:1px solid color-mix(in srgb, var(--paper) 30%, transparent);
+  }
+  .curl a:hover { color:var(--accent); border-bottom-color:var(--accent); }
+  .curl .qs { color:var(--accent); }
+
+  /* rtc */
+  .rtc-row { display:flex; align-items:center; gap:10px; font-size:13px; }
+  .rtc-led {
+    width:9px; height:9px; border-radius:50%; background:var(--muted-2);
+  }
+  .rtc-row[data-state="probing"] .rtc-led { background:var(--warn); animation:pulse 1s infinite; }
+  .rtc-row[data-state="ok"] .rtc-led      { background:var(--good); }
+  .rtc-row[data-state="leak"] .rtc-led    { background:var(--accent); }
+  @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.35} }
+  .rtc-list {
+    margin-top:10px; font-family:var(--mono); font-size:11.5px;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .rtc-list .leak { color:var(--accent); font-weight:600; }
+  .rtc-list .ok   { color:var(--good); }
+  .rtc-list .dim  { color:var(--muted); }
+
+  /* footer */
+  footer {
+    margin-top:clamp(40px, 6vw, 80px);
+    padding-top:14px;
+    border-top:2px solid var(--rule);
+    display:flex; justify-content:space-between; gap:14px;
+    font-size:11px; font-weight:600;
+    text-transform:uppercase; letter-spacing:0.14em;
+    color:var(--muted); flex-wrap:wrap;
+  }
+  footer a { color:var(--ink); }
+
+  .toast {
+    position:fixed; bottom:18px; left:50%;
+    transform:translateX(-50%) translateY(14px);
+    background:var(--ink); color:var(--bg);
+    font-size:12px; font-weight:600;
+    padding:10px 14px; opacity:0;
+    transition:transform 180ms ease, opacity 180ms ease;
+    pointer-events:none; z-index:50;
+  }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="meta-top">
+    <span class="dot"></span>
+    <span>ip.unt1.com</span>
+    <span class="sep">/</span>
+    <span class="ver">Intelligence · Lookup · v3</span>
+    {{if .DBLoaded}}<span class="sep">/</span><span class="ver" data-rel="{{.DBLoaded}}">vpn db {{.DBLoaded}}</span>{{end}}
+  </div>
+  <div style="display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap;">
+    <button class="design-swap" type="button" onclick="document.cookie='style=classic; max-age=31536000; path=/; samesite=lax'; location.reload();">↺ Classic design</button>
+    <form class="search" action="/" method="get" role="search" onsubmit="var v=this.q.value.trim(); if(!v) return false; window.location='/'+encodeURIComponent(v); return false;">
+      <input name="q" type="text" placeholder="QUERY ANOTHER IP…" autocomplete="off" spellcheck="false">
+    </form>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="label">
+      <span>{{if .IsLookup}}looking up{{else}}your public address{{end}}</span>
+      {{if .Version}}<span class="v">IPv{{if eq .Version "v4"}}4{{else}}6{{end}}</span>{{end}}
+    </div>
+    <div class="ip{{if eq .Version "v6"}} v6{{end}}" id="ip" title="tap to copy">{{range .IPParts}}{{if .Sep}}<span class="sep">{{.V}}</span>{{else}}{{.V}}{{end}}{{end}}</div>
+    {{if .IsLookup}}
+    <div class="lookup-note">3rd-party lookup. Your own IP is <a href="/">{{.ReqIP}}</a>.</div>
+    {{end}}
+
+    <div class="verdict {{.Verdict.Tone}}" role="status" aria-label="Verdict: {{.Verdict.Stamp}}">
+      <span class="stamp"><span class="led"></span>{{.Verdict.Stamp}}</span>
+      <span class="what">{{.Verdict.What}}</span>
+      {{if .Verdict.Src}}<span class="src">· {{.Verdict.Src}}</span>{{end}}
+    </div>
+    {{if and (ne .Verdict.Tone "good") .VPN.Reasons}}
+    <div class="verdict-detail">
+      <ul>{{range .VPN.Reasons}}<li>{{.}}</li>{{end}}</ul>
+    </div>
+    {{end}}
+  </section>
+
+  <div class="grid">
+
+    <div class="section">
+      <h2><span>Location</span><span class="n">01</span></h2>
+      <div class="data">
+        <span class="label">Country</span>
+        <span class="value lg">
+          {{if .Country}}{{if .CountryFlag}}<span class="flag">{{.CountryFlag}}</span>{{end}}{{.Country}}{{else}}<span class="dim">—</span>{{end}}
+        </span>
+      </div>
+      <div class="data">
+        <span class="label">Registry</span>
+        <span class="value">
+          {{if .RIR}}{{.RIR}}{{else}}<span class="dim">—</span>{{end}}
+          {{if .Allocated}}<span class="small">allocated {{.Allocated}}</span>{{end}}
+        </span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2><span>Network</span><span class="n">02</span></h2>
+      <div class="data">
+        <span class="label">Operator</span>
+        <span class="value lg">{{if .ASOrg}}{{.ASOrg}}{{else}}<span class="dim">—</span>{{end}}</span>
+      </div>
+      <div class="data">
+        <span class="label">ASN</span>
+        <span class="value mono">{{if .ASN}}AS{{.ASN}}{{else}}<span class="dim">—</span>{{end}}</span>
+      </div>
+      <div class="data">
+        <span class="label">Prefix</span>
+        <span class="value mono">{{if .Prefix}}{{.Prefix}}{{else}}<span class="dim">—</span>{{end}}</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2><span>Privacy</span><span class="n">03</span></h2>
+      <div class="data">
+        <span class="label">Verdict</span>
+        <span class="value lg {{if eq .Verdict.Tone "good"}}{{else}}accent{{end}}">{{.Verdict.Stamp}}</span>
+      </div>
+      <div class="data">
+        <span class="label">Detail</span>
+        <span class="value">{{.Verdict.What}}</span>
+      </div>
+      {{if .Verdict.Src}}
+      <div class="data">
+        <span class="label">Source</span>
+        <span class="value mono">{{.Verdict.Src}}</span>
+      </div>
+      {{end}}
+    </div>
+
+    {{if not .IsLookup}}
+    <div class="section span12">
+      <h2><span>Routing</span><span class="n">04</span></h2>
+      <div class="data">
+        <span class="label">Path</span>
+        <span class="value path">
+          <span class="node you">{{if .CountryFlag}}{{.CountryFlag}} {{end}}you</span>
+          <span class="arrow">→</span>
+          <span class="node">{{if .ColoFlag}}{{.ColoFlag}} {{end}}CF · {{if .ColoCity}}{{.ColoCity}}{{else}}{{.Colo}}{{end}}</span>
+          <span class="arrow">→</span>
+          <span class="node">ipunt1</span>
+        </span>
+      </div>
+    </div>
+    {{end}}
+
+    <div class="section span6">
+      <h2><span>Reverse DNS</span><span class="n">{{if .IsLookup}}04{{else}}05{{end}}</span></h2>
+      <div class="data">
+        <span class="label">PTR</span>
+        <span class="value mono">{{if .Reverse}}{{.Reverse}}{{else}}<span class="dim">— no PTR record</span>{{end}}</span>
+      </div>
+      {{if and .Ray (not .IsLookup)}}
+      <div class="data">
+        <span class="label">CF Ray</span>
+        <span class="value mono">{{.Ray}}
+          {{if .ColoCity}}<span class="small">{{if .ColoFlag}}{{.ColoFlag}} {{end}}{{.ColoCity}}{{if .ColoCountry}}, {{.ColoCountry}}{{end}} · IATA {{.Colo}}</span>{{else if .Colo}}<span class="small">colo {{.Colo}}</span>{{end}}
+        </span>
+      </div>
+      {{end}}
+    </div>
+
+    {{if not .IsLookup}}
+    <div class="section span6">
+      <h2><span>Browser</span><span class="n">06</span></h2>
+      <div class="data">
+        <span class="label">Agent</span>
+        <span class="value">{{if .UAPretty}}<span class="ua-pretty">{{.UAPretty}}</span>{{else}}<span class="dim">— no client hints</span>{{end}}</span>
+      </div>
+      <div class="data">
+        <span class="label">User-Agent String</span>
+        <span class="value ua-raw">{{.UA}}</span>
+      </div>
+      <div class="data">
+        <span class="label">WebRTC Leak Probe</span>
+        <span class="value">
+          <span id="rtc" class="rtc-row" data-state="probing">
+            <span class="rtc-led"></span>
+            <span id="rtc-text">probing ICE candidates…</span>
+          </span>
+          <div id="rtc-list" class="rtc-list"></div>
+        </span>
+      </div>
+    </div>
+    {{end}}
+
+    <div class="section span12">
+      <h2><span>CLI Surface</span><span class="n">{{if .IsLookup}}05{{else}}07{{end}}</span></h2>
+      <div class="curl">
+        <div class="row"><div class="cm">// plain IP, newline-terminated</div><span class="prompt">$</span>curl <a href="/">https://ip.unt1.com/</a></div>
+        <div class="row"><div class="cm">// full JSON: ip, country, asn, prefix, vpn verdict, ua…</div><span class="prompt">$</span>curl <a href="/json">https://ip.unt1.com/json</a></div>
+        <div class="row"><div class="cm">// same payload, YAML</div><span class="prompt">$</span>curl <a href="/json?format=yaml">https://ip.unt1.com/json<span class="qs">?format=yaml</span></a></div>
+        <div class="row"><div class="cm">// just the VPN/proxy verdict</div><span class="prompt">$</span>curl <a href="/vpn">https://ip.unt1.com/vpn</a></div>
+        <div class="row"><div class="cm">// Cloudflare-style key=value</div><span class="prompt">$</span>curl <a href="/trace">https://ip.unt1.com/trace</a></div>
+        <div class="row"><div class="cm">// look up an arbitrary IP</div><span class="prompt">$</span>curl <a href="/json?ip=8.8.8.8">https://ip.unt1.com/json<span class="qs">?ip=8.8.8.8</span></a></div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  <div>{{if .Country}}{{.CountryFlag}} {{.Country}} · {{end}}AS{{.ASN}} · {{.ASOrg}}</div>
+  <div><a href="https://github.com/faeton/ip.unt1.com">github.com/faeton/ip.unt1.com</a> · MIT</div>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // copy IP
+  (function () {
+    var ipEl = document.getElementById('ip');
+    var toast = document.getElementById('toast');
+    function showToast(msg){ toast.textContent=msg; toast.classList.add('show'); setTimeout(function(){toast.classList.remove('show');},1500); }
+    ipEl.addEventListener('click', async function(){
+      var ip = ipEl.textContent.trim();
+      try { await navigator.clipboard.writeText(ip); showToast('copied ' + ip); }
+      catch(_){ showToast('copy failed'); }
+    });
+  })();
+
+  // relative time on db loaded
+  (function () {
+    var el = document.querySelector('[data-rel]');
+    if (!el) return;
+    var d = new Date(el.dataset.rel);
+    if (isNaN(d.getTime())) return;
+    var s = (Date.now() - d.getTime()) / 1000;
+    var rel = s < 60 ? 'just now'
+      : s < 3600 ? Math.floor(s/60) + 'm ago'
+      : s < 86400 ? Math.floor(s/3600) + 'h ago'
+      : Math.floor(s/86400) + 'd ago';
+    el.textContent = 'vpn db ' + rel;
+  })();
+
+  // WebRTC leak probe
+  (function () {
+    var row = document.getElementById('rtc');
+    if (!row || !window.RTCPeerConnection) return;
+    var text = document.getElementById('rtc-text');
+    var list = document.getElementById('rtc-list');
+    var pc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.cloudflare.com:3478' }] });
+    var found = new Map();
+    var isV4 = function(s){ return /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/.test(s); };
+    var isV6 = function(s){ return s.indexOf(':')!==-1 && /^[0-9a-f:.%]+$/i.test(s); };
+    function classify(a){
+      if (isV4(a)) return (/^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\.|^127\.|^169\.254\./.test(a)) ? 'private' : 'public';
+      if (isV6(a)) return (/^fe80:|^fc|^fd/i.test(a) || a==='::1') ? 'private' : 'public';
+      return null;
+    }
+    pc.onicecandidate = function(e){
+      if (!e.candidate || !e.candidate.candidate) return;
+      var p = e.candidate.candidate.replace(/^candidate:/,'').split(/\s+/);
+      if (p.length<8) return;
+      var addr = p[4], ti = p.indexOf('typ'), ct = ti>=0 ? p[ti+1] : '?';
+      if (/\.local$/i.test(addr)) { found.set(addr, 'mdns ('+ct+')'); return; }
+      var c = classify(addr); if (!c) return;
+      found.set(addr, c+' ('+ct+')');
+    };
+    pc.createDataChannel('x');
+    pc.createOffer().then(function(o){ return pc.setLocalDescription(o); }).catch(function(){});
+    var detected = (document.getElementById('ip').textContent || '').trim();
+    setTimeout(function(){
+      pc.close();
+      var entries = Array.from(found.entries());
+      var rows = entries.map(function(e){
+        var addr = e[0], kind = e[1], cls = 'dim', tag = '';
+        if (/^public/.test(kind)) {
+          if (addr === detected) { cls='ok'; tag='matches detected'; }
+          else { cls='leak'; tag='differs — leak'; }
+        } else if (/^mdns/.test(kind))    { tag='mdns-protected'; }
+        else if (/^private/.test(kind))   { tag='local network'; }
+        return '<div class="'+cls+'">'+addr+' · '+tag+' · '+kind+'</div>';
+      });
+      var leaks = entries.filter(function(e){
+        return /^public/.test(e[1]) && e[0] !== detected;
+      });
+      if (entries.length === 0) {
+        row.dataset.state='ok';
+        text.textContent='no candidates surfaced — mDNS-protected or blocked';
+      } else if (leaks.length > 0) {
+        row.dataset.state='leak';
+        text.textContent=leaks.length+' leak'+(leaks.length>1?'s':'')+' — real client IP exposed';
+      } else {
+        row.dataset.state='ok';
+        text.textContent='no leak · '+entries.length+' candidate(s) match egress';
+      }
+      list.innerHTML = rows.join('');
+    }, 1500);
+  })();
+</script>
+</body>
+</html>
