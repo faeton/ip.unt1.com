@@ -604,5 +604,9 @@ func datacenterASNs() map[int]string {
 		44477: "Stark Industries",
 		// Netrouting (NL) — AirVPN egress, also used by other VPN providers.
 		6206: "Netrouting",
+		// GSL Networks (AU) — hosts Packethub-assigned NordVPN ranges and
+		// other VPN-rental capacity. WHOIS netname like "PACKETHUB-*" then
+		// resolves the brand.
+		137409: "GSL Networks",
 	}
 }
