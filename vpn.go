@@ -563,8 +563,8 @@ func itoa(n int) string {
 func datacenterASNs() map[int]string {
 	return map[int]string{
 		// Top VPN-rental hosters.
-		9009:   "M247",                  // hosts ExpressVPN, PIA, Surfshark, many more
-		60068:  "Datacamp / CDN77",      // CyberGhost, others
+		9009:   "M247",             // hosts ExpressVPN, PIA, Surfshark, many more
+		60068:  "Datacamp / CDN77", // CyberGhost, others
 		200651: "Flokinet",
 		20473:  "Choopa / Vultr",
 		16276:  "OVH",

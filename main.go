@@ -5,20 +5,22 @@
 // resolve ourselves via Team Cymru DNS whois (free, public, no DB).
 //
 // Surface:
-//   GET /             text/plain IP for curl, HTML for browsers (Accept negotiation)
-//   GET /json         full JSON (ip, country, asn, asorg, vpn verdict, headers subset)
-//   GET /vpn          JSON: { vpn: bool, reasons: [...], provider?: "mullvad", ... }
-//   GET /trace        Cloudflare-style key=value plain text
-//   GET /headers      human header dump
-//   GET /all          plain-text full debug summary
-//   GET /ua           User-Agent only
-//   GET /reverse      reverse DNS PTR
-//   GET /health       "ok"
-//   GET /ip/{addr}    same as / but for an arbitrary IP (browser HTML or curl plain)
+//
+//	GET /             text/plain IP for curl, HTML for browsers (Accept negotiation)
+//	GET /json         full JSON (ip, country, asn, asorg, vpn verdict, headers subset)
+//	GET /vpn          JSON: { vpn: bool, reasons: [...], provider?: "mullvad", ... }
+//	GET /trace        Cloudflare-style key=value plain text
+//	GET /headers      human header dump
+//	GET /all          plain-text full debug summary
+//	GET /ua           User-Agent only
+//	GET /reverse      reverse DNS PTR
+//	GET /health       "ok"
+//	GET /ip/{addr}    same as / but for an arbitrary IP (browser HTML or curl plain)
 //
 // Query params:
-//   ?ip=<addr>        on /, /json, /vpn, /trace, /all, /reverse — look up another IP
-//   ?format=yaml|hosts  on /json — alternate output formats
+//
+//	?ip=<addr>        on /, /json, /vpn, /trace, /all, /reverse — look up another IP
+//	?format=yaml|hosts  on /json — alternate output formats
 package main
 
 import (
@@ -88,6 +90,11 @@ type server struct {
 	logger *slog.Logger
 	// loadedAt is set when the VPN DB has its first successful refresh.
 	loadedAt atomic.Pointer[time.Time]
+	// UA-string dedup for journal logging — one bucket for unidentified
+	// browsers (so we can adopt nicer rendering later), one for declared
+	// bots/scrapers (curiosity / abuse).
+	uaUnknownSeen *uaSeenSet
+	uaBotSeen     *uaSeenSet
 }
 
 func main() {
@@ -107,11 +114,13 @@ func main() {
 	logger := slog.New(handler)
 
 	srv := &server{
-		cfg:    cfg,
-		asn:    newASNResolver(logger),
-		vpn:    newVPNDB(logger),
-		whois:  newWhoisCache(),
-		logger: logger,
+		cfg:           cfg,
+		asn:           newASNResolver(logger),
+		vpn:           newVPNDB(logger),
+		whois:         newWhoisCache(),
+		logger:        logger,
+		uaUnknownSeen: newUASeenSet(1024, 6*time.Hour),
+		uaBotSeen:     newUASeenSet(1024, 6*time.Hour),
 	}
 
 	mux := http.NewServeMux()
@@ -362,26 +371,37 @@ func splitTopLevel(s string, sep byte) []string {
 // dataset is what we render. Same shape across HTML/JSON/YAML/trace/all
 // so output formats stay in sync.
 type dataset struct {
-	IP        string `json:"ip" yaml:"ip"`
-	Version   string `json:"version" yaml:"version"`
-	Country   string `json:"country" yaml:"country"`
-	ASN       int    `json:"asn" yaml:"asn"`
-	ASOrg     string `json:"asorg" yaml:"asorg"`
-	Prefix    string `json:"prefix,omitempty" yaml:"prefix,omitempty"`
-	RIR       string `json:"rir,omitempty" yaml:"rir,omitempty"`
-	Allocated string `json:"allocated,omitempty" yaml:"allocated,omitempty"`
-	Reverse   string `json:"reverse,omitempty" yaml:"reverse,omitempty"`
-	UA        string `json:"ua,omitempty" yaml:"ua,omitempty"`
-	UAPretty  string `json:"ua_pretty,omitempty" yaml:"ua_pretty,omitempty"`
-	Via       string `json:"via,omitempty" yaml:"via,omitempty"`
-	Ray       string `json:"ray,omitempty" yaml:"ray,omitempty"`
-	Colo      string `json:"colo,omitempty" yaml:"colo,omitempty"`
-	ColoCity    string `json:"colo_city,omitempty" yaml:"colo_city,omitempty"`
-	ColoCountry string `json:"colo_country,omitempty" yaml:"colo_country,omitempty"`
-	VPN       vpnVerdict `json:"vpn" yaml:"vpn"`
-	DBLoaded  string `json:"db_loaded,omitempty" yaml:"db_loaded,omitempty"`
-	IsLookup  bool   `json:"-" yaml:"-"`
-	ReqIP     string `json:"-" yaml:"-"`
+	IP             string     `json:"ip" yaml:"ip"`
+	Version        string     `json:"version" yaml:"version"`
+	Country        string     `json:"country" yaml:"country"`
+	ASN            int        `json:"asn" yaml:"asn"`
+	ASOrg          string     `json:"asorg" yaml:"asorg"`
+	Prefix         string     `json:"prefix,omitempty" yaml:"prefix,omitempty"`
+	RIR            string     `json:"rir,omitempty" yaml:"rir,omitempty"`
+	Allocated      string     `json:"allocated,omitempty" yaml:"allocated,omitempty"`
+	Reverse        string     `json:"reverse,omitempty" yaml:"reverse,omitempty"`
+	UA             string     `json:"ua,omitempty" yaml:"ua,omitempty"`
+	UAPretty       string     `json:"ua_pretty,omitempty" yaml:"ua_pretty,omitempty"`
+	Browser        string     `json:"browser,omitempty" yaml:"browser,omitempty"`
+	BrowserVersion string     `json:"browser_version,omitempty" yaml:"browser_version,omitempty"`
+	Engine         string     `json:"engine,omitempty" yaml:"engine,omitempty"`
+	OS             string     `json:"os,omitempty" yaml:"os,omitempty"`
+	OSVersion      string     `json:"os_version,omitempty" yaml:"os_version,omitempty"`
+	Device         string     `json:"device,omitempty" yaml:"device,omitempty"`
+	UAHints        bool       `json:"ua_hints,omitempty" yaml:"ua_hints,omitempty"`
+	Bot            bool       `json:"bot,omitempty" yaml:"bot,omitempty"`
+	BrowserSlug    string     `json:"-" yaml:"-"`
+	OSSlug         string     `json:"-" yaml:"-"`
+	DeviceSlug     string     `json:"-" yaml:"-"`
+	Via            string     `json:"via,omitempty" yaml:"via,omitempty"`
+	Ray            string     `json:"ray,omitempty" yaml:"ray,omitempty"`
+	Colo           string     `json:"colo,omitempty" yaml:"colo,omitempty"`
+	ColoCity       string     `json:"colo_city,omitempty" yaml:"colo_city,omitempty"`
+	ColoCountry    string     `json:"colo_country,omitempty" yaml:"colo_country,omitempty"`
+	VPN            vpnVerdict `json:"vpn" yaml:"vpn"`
+	DBLoaded       string     `json:"db_loaded,omitempty" yaml:"db_loaded,omitempty"`
+	IsLookup       bool       `json:"-" yaml:"-"`
+	ReqIP          string     `json:"-" yaml:"-"`
 }
 
 func (s *server) gather(r *http.Request) dataset {
@@ -402,31 +422,65 @@ func (s *server) gather(r *http.Request) dataset {
 	}
 
 	hints := parseClientHints(r)
+	ua := parseUA(info.UA, hints)
+	s.recordUA(info.UA, ua, hints, targetRaw, asn.ASN)
 
 	colo := cfColo(info.CFRay)
 	coloCityName, coloCC := coloLocation(colo)
 
 	return dataset{
-		IP:        targetRaw,
-		Version:   ipVersion(target),
-		Country:   country,
-		ASN:       asn.ASN,
-		ASOrg:     asn.Org,
-		Prefix:    asn.Prefix,
-		RIR:       strings.ToLower(asn.RIR),
-		Allocated: asn.Allocated,
-		Reverse:   reverse,
-		UA:        info.UA,
-		UAPretty:  hints.Pretty(),
-		Via:       info.Via,
-		Ray:         info.CFRay,
-		Colo:        colo,
-		ColoCity:    coloCityName,
-		ColoCountry: coloCC,
-		VPN:       verdict,
-		DBLoaded:  s.vpnLoadedAt(),
-		IsLookup:  isLookup,
-		ReqIP:     info.IPRaw,
+		IP:             targetRaw,
+		Version:        ipVersion(target),
+		Country:        country,
+		ASN:            asn.ASN,
+		ASOrg:          asn.Org,
+		Prefix:         asn.Prefix,
+		RIR:            strings.ToLower(asn.RIR),
+		Allocated:      asn.Allocated,
+		Reverse:        reverse,
+		UA:             info.UA,
+		UAPretty:       hints.Pretty(),
+		Browser:        ua.Browser,
+		BrowserVersion: ua.BrowserVersion,
+		Engine:         ua.Engine,
+		OS:             ua.OS,
+		OSVersion:      ua.OSVersion,
+		Device:         ua.Device,
+		UAHints:        hints.Brand != "",
+		Bot:            ua.Bot,
+		BrowserSlug:    ua.BrowserSlug,
+		OSSlug:         ua.OSSlug,
+		DeviceSlug:     ua.DeviceSlug,
+		Via:            info.Via,
+		Ray:            info.CFRay,
+		Colo:           colo,
+		ColoCity:       coloCityName,
+		ColoCountry:    coloCC,
+		VPN:            verdict,
+		DBLoaded:       s.vpnLoadedAt(),
+		IsLookup:       isLookup,
+		ReqIP:          info.IPRaw,
+	}
+}
+
+// recordUA emits a deduped journal line whenever we see a UA we couldn't
+// identify or one that self-declares as automated. Both buckets share a TTL
+// dedup so the same scraper hammering us doesn't flood the log. Empty UAs
+// are ignored — most of the time those are health checks or our own probes.
+func (s *server) recordUA(rawUA string, ua uaInfo, hints clientHints, ip string, asn int) {
+	if rawUA == "" {
+		return
+	}
+	switch {
+	case ua.Bot:
+		if s.uaBotSeen.firstSeen(rawUA) {
+			s.logger.Info("ua_bot", "ua", rawUA, "ip", ip, "asn", asn)
+		}
+	case ua.Browser == "":
+		if s.uaUnknownSeen.firstSeen(rawUA) {
+			s.logger.Info("ua_unknown", "ua", rawUA, "ip", ip, "asn", asn,
+				"hints_brand", hints.Brand, "hints_platform", hints.Platform)
+		}
 	}
 }
 
@@ -581,7 +635,27 @@ func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "reverse:   %s\n", emptyDash(d.Reverse))
 	fmt.Fprintf(w, "ua:        %s\n", d.UA)
 	if d.UAPretty != "" {
-		fmt.Fprintf(w, "browser:   %s\n", d.UAPretty)
+		fmt.Fprintf(w, "ua_pretty: %s\n", d.UAPretty)
+	}
+	if d.Browser != "" {
+		v := d.Browser
+		if d.BrowserVersion != "" {
+			v += " " + d.BrowserVersion
+		}
+		fmt.Fprintf(w, "browser:   %s\n", v)
+	}
+	if d.Engine != "" {
+		fmt.Fprintf(w, "engine:    %s\n", d.Engine)
+	}
+	if d.OS != "" {
+		v := d.OS
+		if d.OSVersion != "" {
+			v += " " + d.OSVersion
+		}
+		fmt.Fprintf(w, "os:        %s\n", v)
+	}
+	if d.Device != "" {
+		fmt.Fprintf(w, "device:    %s\n", strings.ToLower(d.Device))
 	}
 	fmt.Fprintf(w, "via:       %s\n", d.Via)
 	if d.Ray != "" {
@@ -648,6 +722,12 @@ func writeYAML(w http.ResponseWriter, d dataset) {
 	emit("reverse", d.Reverse)
 	emit("ua", d.UA)
 	emit("ua_pretty", d.UAPretty)
+	emit("browser", d.Browser)
+	emit("browser_version", d.BrowserVersion)
+	emit("engine", d.Engine)
+	emit("os", d.OS)
+	emit("os_version", d.OSVersion)
+	emit("device", strings.ToLower(d.Device))
 	emit("via", d.Via)
 	emit("ray", d.Ray)
 	emit("colo", d.Colo)
