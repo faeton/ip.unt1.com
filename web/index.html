@@ -293,19 +293,9 @@
   .ua-pill.warn { color:var(--warn); border-color:var(--warn); }
   .ua-pill.warn::before { content:"⚠ "; }
 
-  .ua-raw-d { margin-top:4px; }
-  .ua-raw-d summary {
-    list-style:none; cursor:pointer; font-size:10px;
-    letter-spacing:0.12em; text-transform:uppercase; color:var(--muted);
-    display:flex; align-items:center; gap:8px;
-    padding:9px 0; border-top:1px dashed var(--rule-soft);
-  }
-  .ua-raw-d summary::-webkit-details-marker { display:none; }
-  .ua-raw-d summary .chev { color:var(--muted-2); transition:transform 120ms ease; }
-  .ua-raw-d[open] summary .chev { transform:rotate(90deg); }
-  .ua-raw {
-    font-size:11px; color:var(--muted); word-break:break-all;
-    line-height:1.55; padding:4px 0 6px;
+  .ua-row .v.ua-raw-inline {
+    display:block; font-size:11px; color:var(--muted);
+    word-break:break-all; line-height:1.55;
   }
   @media (max-width:380px) {
     .ua-row { grid-template-columns:18px 1fr; }
@@ -636,18 +626,11 @@
         <span class="v">{{if .OS}}{{.OS}}{{if .OSVersion}} <span style="color:var(--muted)">{{.OSVersion}}</span>{{end}}{{else}}<span class="dim">— unknown</span>{{end}}</span>
       </div>
       <div class="ua-row">
-        <span class="ua-icon"><svg><use href="#i-hints"/></svg></span>
-        <span class="k">hints</span>
-        <span class="v" style="color:var(--muted);font-size:11.5px">
-          {{if .UAHints}}Sec-CH-UA present · machine-readable{{else}}Sec-CH-UA absent · regex parse on UA string{{end}}
-        </span>
+        <span class="ua-icon" title="{{if .UAHints}}Parsed from Sec-CH-UA client hints (Chromium-family){{else}}No Sec-CH-UA — parsed via regex on UA string (Firefox/Safari don't send hints){{end}}" style="cursor:help"><svg><use href="#i-hints"/></svg></span>
+        <span class="k">ua</span>
+        <span class="v ua-raw-inline">{{.UA}}</span>
       </div>
     </div>
-
-    <details class="ua-raw-d">
-      <summary><span class="chev">▸</span>raw user-agent</summary>
-      <div class="ua-raw">{{.UA}}</div>
-    </details>
   </section>
   {{end}}
 

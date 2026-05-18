@@ -216,7 +216,6 @@
   .path .node.you { background:var(--ink); color:var(--bg); border-color:var(--ink); }
   .path .arrow { color:var(--accent); font-weight:700; }
 
-  .ua-pretty { font-size:14px; font-weight:500; margin-bottom:6px; }
   .ua-raw { font-family:var(--mono); font-size:11px; color:var(--muted); word-break:break-all; }
 
   /* ua stat grid */
@@ -252,9 +251,8 @@
   .ua-pill.calm { opacity:0.65; }
   .ua-pill.warn { color:var(--accent); border-color:var(--accent); }
   .ua-pill.warn::before { content:"⚠ "; }
-  .ua-hint-line {
-    font-family:var(--mono); font-size:11px; color:var(--muted);
-    font-weight:400;
+  .ua-grid .value.ua-raw {
+    display:block; font-size:11px; font-weight:400;
   }
 
   /* curl */
@@ -551,14 +549,10 @@
           <span class="value">{{if .OS}}{{.OS}}{{if .OSVersion}} <span class="ver">{{.OSVersion}}</span>{{end}}{{else}}<span class="dim">— unknown</span>{{end}}</span>
         </div>
         <div class="row">
-          <span class="icon"><svg><use href="#i-hints"/></svg></span>
-          <span class="label">Hints</span>
-          <span class="value ua-hint-line">{{if .UAHints}}Sec-CH-UA present · machine-readable{{else}}Sec-CH-UA absent · regex parse on UA string{{end}}</span>
+          <span class="icon" title="{{if .UAHints}}Parsed from Sec-CH-UA client hints (Chromium-family){{else}}No Sec-CH-UA — parsed via regex on UA string (Firefox/Safari don't send hints){{end}}" style="cursor:help"><svg><use href="#i-hints"/></svg></span>
+          <span class="label">UA</span>
+          <span class="value ua-raw">{{.UA}}</span>
         </div>
-      </div>
-      <div class="data">
-        <span class="label">User-Agent String</span>
-        <span class="value ua-raw">{{.UA}}</span>
       </div>
       <div class="data">
         <span class="label">WebRTC Leak Probe</span>
