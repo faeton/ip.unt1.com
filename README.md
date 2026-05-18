@@ -9,6 +9,7 @@ single static Go binary. Currently deployed to `on1` behind Caddy + Cloudflare.
 |-------------|--------------------------------|------------------------------------|
 | `/`         | plain IP, trailing newline     | full diagnostics page              |
 | `/json`     | full JSON (IP, ASN, VPN, …)    | same                               |
+| `/country`  | `IP COUNTRY`, JSON with `Accept: application/json` | same              |
 | `/vpn`      | JSON: `{vpn, tor, provider, reasons, source}` | same             |
 | `/headers`  | selected request headers       | same                               |
 | `/all`      | all fields, plain text         | same                               |

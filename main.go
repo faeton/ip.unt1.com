@@ -8,6 +8,7 @@
 //
 //	GET /             text/plain IP for curl, HTML for browsers (Accept negotiation)
 //	GET /json         full JSON (ip, country, asn, asorg, vpn verdict, headers subset)
+//	GET /country      text: "ip country"; JSON when Accept asks for JSON
 //	GET /vpn          JSON: { vpn: bool, reasons: [...], provider?: "mullvad", ... }
 //	GET /trace        Cloudflare-style key=value plain text
 //	GET /headers      human header dump
@@ -19,8 +20,9 @@
 //
 // Query params:
 //
-//	?ip=<addr>        on /, /json, /vpn, /trace, /all, /reverse — look up another IP
+//	?ip=<addr>        on /, /json, /country, /vpn, /trace, /all, /reverse — look up another IP
 //	?format=yaml|hosts  on /json — alternate output formats
+//	?format=json      on /country — force JSON without Accept negotiation
 package main
 
 import (
@@ -127,6 +129,7 @@ func main() {
 	mux.HandleFunc("GET /", srv.handleRoot)
 	mux.HandleFunc("GET /ip/{addr}", srv.handleRoot)
 	mux.HandleFunc("GET /json", srv.handleJSON)
+	mux.HandleFunc("GET /country", srv.handleCountry)
 	mux.HandleFunc("GET /vpn", srv.handleVPN)
 	mux.HandleFunc("GET /trace", srv.handleTrace)
 	mux.HandleFunc("GET /headers", srv.handleHeaders)
@@ -536,6 +539,26 @@ func (s *server) handleJSON(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *server) handleCountry(w http.ResponseWriter, r *http.Request) {
+	d := s.gather(r)
+	body := struct {
+		IP      string `json:"ip"`
+		Country string `json:"country"`
+	}{
+		IP:      d.IP,
+		Country: d.Country,
+	}
+
+	if wantsJSON(r) || strings.EqualFold(r.URL.Query().Get("format"), "json") {
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+
+	noStore(w)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "%s %s\n", d.IP, emptyDash(d.Country))
+}
+
 func (s *server) handleVPN(w http.ResponseWriter, r *http.Request) {
 	d := s.gather(r)
 	writeJSON(w, http.StatusOK, d.VPN)
@@ -776,6 +799,11 @@ func noStore(w http.ResponseWriter) {
 // browser-vs-curl rule the previous Caddy block used.
 func wantsHTML(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+func wantsJSON(r *http.Request) bool {
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	return strings.Contains(accept, "application/json") || strings.Contains(accept, "+json")
 }
 
 func ipVersion(a netip.Addr) string {

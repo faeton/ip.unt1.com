@@ -572,6 +572,7 @@
       <div class="curl">
         <div class="row"><div class="cm">// plain IP, newline-terminated</div><span class="prompt">$</span>curl <a href="/">https://ip.unt1.com/</a></div>
         <div class="row"><div class="cm">// full JSON: ip, country, asn, prefix, vpn verdict, ua…</div><span class="prompt">$</span>curl <a href="/json">https://ip.unt1.com/json</a></div>
+        <div class="row"><div class="cm">// compact IP plus country code; JSON if Accept asks for it</div><span class="prompt">$</span>curl <a href="/country">https://ip.unt1.com/country</a></div>
         <div class="row"><div class="cm">// same payload, YAML</div><span class="prompt">$</span>curl <a href="/json?format=yaml">https://ip.unt1.com/json<span class="qs">?format=yaml</span></a></div>
         <div class="row"><div class="cm">// just the VPN/proxy verdict</div><span class="prompt">$</span>curl <a href="/vpn">https://ip.unt1.com/vpn</a></div>
         <div class="row"><div class="cm">// Cloudflare-style key=value</div><span class="prompt">$</span>curl <a href="/trace">https://ip.unt1.com/trace</a></div>
