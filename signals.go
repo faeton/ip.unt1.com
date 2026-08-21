@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -100,21 +99,27 @@ func checkRDNSHostname(rdns string) (string, bool) {
 
 // ---------- WHOIS ----------
 
-type whoisCacheEntry struct {
-	label   string
-	expires time.Time
+type whoisCache struct {
+	cache *ttlCache[string]
+	// sem caps concurrent port-43 connections. RIRs rate-limit and will
+	// block a host that opens many at once, and each query holds a request
+	// goroutine for up to 4s.
+	sem chan struct{}
 }
 
-type whoisCache struct {
-	mu sync.RWMutex
-	m  map[string]whoisCacheEntry
-}
+const (
+	whoisTTL         = 24 * time.Hour
+	whoisErrorTTL    = 5 * time.Minute
+	whoisCacheMax    = 20_000
+	whoisMaxInFlight = 4
+)
 
 func newWhoisCache() *whoisCache {
-	return &whoisCache{m: make(map[string]whoisCacheEntry, 1024)}
+	return &whoisCache{
+		cache: newTTLCache[string](whoisCacheMax),
+		sem:   make(chan struct{}, whoisMaxInFlight),
+	}
 }
-
-const whoisTTL = 24 * time.Hour
 
 // rirServer maps the Cymru-reported RIR codes to whois servers.
 // "" / unknown → IANA, which will refer us to the right RIR (one extra hop).
@@ -128,54 +133,68 @@ var rirServer = map[string]string{
 }
 
 // Lookup returns a brand label parsed from WHOIS, with a 24h cache.
-// Caches negative results too — clean residential IPs don't need to be
-// re-queried on every page load.
-func (c *whoisCache) Lookup(ctx context.Context, ip netip.Addr, rir string) (string, bool) {
-	if !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+//
+// Keyed on the announced prefix when Cymru gave us one: WHOIS answers
+// describe a network, not an address, so every address in a prefix shares
+// one answer. That collapses what used to be one port-43 query per unique
+// address into one per network.
+//
+// Negative results are cached too — clean networks shouldn't be re-queried
+// on every page load — but a *failed* query gets a short TTL so a timeout
+// doesn't mask a whole network for a day.
+func (c *whoisCache) Lookup(ctx context.Context, ip netip.Addr, prefix, rir string) (string, bool) {
+	ip = canonicalIP(ip)
+	if !isRoutable(ip) {
 		return "", false
 	}
-	key := ip.String()
-
-	c.mu.RLock()
-	if e, ok := c.m[key]; ok && time.Now().Before(e.expires) {
-		c.mu.RUnlock()
-		return e.label, e.label != ""
+	rir = strings.ToLower(strings.TrimSpace(rir))
+	key := prefix
+	if key == "" {
+		key = ip.String()
 	}
-	c.mu.RUnlock()
-
-	server, ok := rirServer[strings.ToLower(strings.TrimSpace(rir))]
-	if !ok {
-		server = "whois.iana.net"
-	}
-	label := queryWhois(ctx, server, ip.String())
-
-	c.mu.Lock()
-	c.m[key] = whoisCacheEntry{label: label, expires: time.Now().Add(whoisTTL)}
-	c.mu.Unlock()
+	label := c.cache.Do(key+"|"+rir, func() (string, time.Duration) {
+		server, ok := rirServer[rir]
+		if !ok {
+			server = "whois.iana.net"
+		}
+		select {
+		case c.sem <- struct{}{}:
+			defer func() { <-c.sem }()
+		case <-ctx.Done():
+			return "", 0
+		}
+		label, err := queryWhois(ctx, server, ip.String())
+		if err != nil {
+			return "", whoisErrorTTL
+		}
+		return label, whoisTTL
+	})
 	return label, label != ""
 }
 
-// queryWhois connects to a port-43 server, sends the IP, and scans the
+// queryWhois connects to a port-43 server, sends the address, and scans the
 // response body for a known brand marker in netname/descr/owner/remarks.
-func queryWhois(ctx context.Context, server, ipStr string) string {
+// A transport failure is returned as an error so the caller can cache it
+// briefly rather than as an authoritative "no brand".
+func queryWhois(ctx context.Context, server, ipStr string) (string, error) {
 	dctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	d := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := d.DialContext(dctx, "tcp", net.JoinHostPort(server, "43"))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 
-	// ARIN's default output omits org details for IPs; "n + IP" gives the
-	// network record. RIPE/APNIC/LACNIC/AFRINIC accept the bare IP.
+	// ARIN's default output omits org details for addresses; "n + IP" gives
+	// the network record. RIPE/APNIC/LACNIC/AFRINIC accept the bare address.
 	query := ipStr + "\r\n"
 	if strings.Contains(server, "arin") {
 		query = "n + " + ipStr + "\r\n"
 	}
 	if _, err := conn.Write([]byte(query)); err != nil {
-		return ""
+		return "", err
 	}
 
 	sc := bufio.NewScanner(conn)
@@ -200,9 +219,12 @@ func queryWhois(ctx context.Context, server, ipStr string) string {
 		}
 		for _, h := range whoisBrandHints {
 			if strings.Contains(line, h.needle) {
-				return h.label
+				return h.label, nil
 			}
 		}
 	}
-	return ""
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
 }

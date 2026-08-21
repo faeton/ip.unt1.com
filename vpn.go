@@ -3,37 +3,54 @@ package main
 // VPN / proxy / Tor detection.
 //
 // Strategy:
-//  1. Pull official server-IP lists from VPN providers that publish them:
-//     Mullvad, NordVPN, iVPN, AirVPN. Stored in an in-memory hashmap.
+//  1. Pull official server lists from VPN providers that publish them:
+//     Mullvad, NordVPN, iVPN, AirVPN. Full relay records are retained (see
+//     relay.go), not just addresses.
 //  2. Pull the Tor exit list from check.torproject.org.
-//  3. For everything else (ExpressVPN, Surfshark, ProtonVPN, PIA, etc.) we
+//  3. Pull iCloud Private Relay's published egress CIDRs.
+//  4. For everything else (ExpressVPN, Surfshark, ProtonVPN, PIA, etc.) we
 //     match on ASN — these providers rent capacity from a small set of
-//     hosting providers (M247, Datapacket, Tzulo, Quadranet, etc.) that
-//     are unmistakably non-residential.
+//     hosting providers (M247, Datapacket, Tzulo, Quadranet, etc.) that are
+//     unmistakably non-residential.
 //
-// Refresh: on startup + every 6 hours. Each source is fetched independently;
-// a failure on one provider does not invalidate the others.
+// ASNs are split into two tiers. A VPN-rental host means "a VPN probably
+// egresses here"; a hyperscaler means "this is a datacenter" and nothing
+// more. Reporting an AWS or Cloudflare address as vpn:true drowned real VPN
+// hits in noise, so those now report hosting:true with vpn:false.
+//
+// Refresh: on startup + every 6 hours. Each source is fetched and validated
+// independently, and — importantly — a source that fails keeps its previous
+// data instead of vanishing from the snapshot until the next cycle.
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type vpnVerdict struct {
-	VPN          bool     `json:"vpn"`
-	Tor          bool     `json:"tor,omitempty"`
-	PrivacyProxy bool     `json:"privacy_proxy,omitempty"` // iCloud Private Relay etc.
-	Provider     string   `json:"provider,omitempty"`
-	Reasons      []string `json:"reasons,omitempty"`
-	Source       string   `json:"source,omitempty"` // "ip-list" | "asn" | "asn+ip-list" | "cidr"
+	VPN          bool       `json:"vpn"`
+	Hosting      bool       `json:"hosting,omitempty"` // datacenter, but not identified as a VPN
+	Tor          bool       `json:"tor,omitempty"`
+	PrivacyProxy bool       `json:"privacy_proxy,omitempty"` // iCloud Private Relay etc.
+	Provider     string     `json:"provider,omitempty"`
+	Network      string     `json:"network,omitempty"` // hosting/rental operator behind the ASN
+	Relay        *relayInfo `json:"relay,omitempty"`   // exact PoP, when the feed names one
+	Reasons      []string   `json:"reasons,omitempty"`
+	Source       string     `json:"source,omitempty"` // "ip-list" | "asn" | "asn+ip-list" | "cidr"
+	// Ready is false when no provider list has loaded yet. Without it a
+	// cold or offline process reports every address as clean, which reads
+	// as an authoritative pass rather than "we don't know".
+	Ready bool `json:"ready"`
 }
 
 type cidrEntry struct {
@@ -41,28 +58,48 @@ type cidrEntry struct {
 	provider string // "icloud-private-relay"
 }
 
-type vpnSnapshot struct {
-	// IP → provider tag ("mullvad", "nordvpn", "ivpn", "airvpn", "tor")
-	ips map[netip.Addr]string
-	// /24 (v4) or /48 (v6) → provider tag, derived from `ips`.
-	// Catches egress IPs that sit next to a published connect IP — common
-	// for NordVPN, where the API exposes connect addresses but the actual
-	// public-facing egress sits on the same /24. Tor is deliberately
-	// excluded; neighboring IPs of a Tor exit are not themselves exits.
-	ipNets map[netip.Prefix]string
-	// CIDR ranges (iCloud Private Relay etc.) — small list, linear scan.
-	cidrs []cidrEntry
-	// ASN → label for known datacenter/VPN-rental ASNs.
-	dcASN map[int]string
+// sourceData is one feed's last-known-good payload. Kept per source so a
+// failed fetch degrades that source only, and only until it recovers.
+type sourceData struct {
+	relays  []relayInfo
+	addrs   []netip.Addr
+	cidrs   []netip.Prefix
+	fetched time.Time
 }
 
-// netPrefixForIP returns /24 for v4, /48 for v6 — the granularity at which
-// VPN operators typically receive contiguous allocations.
+func (s sourceData) empty() bool {
+	return len(s.relays) == 0 && len(s.addrs) == 0 && len(s.cidrs) == 0
+}
+
+type vpnSnapshot struct {
+	// sources holds each feed's raw last-known-good data. Indexes below
+	// are derived from it on every rebuild.
+	sources map[string]sourceData
+
+	// ips maps an address to its provider tag.
+	ips map[netip.Addr]string
+	// relays maps an address to the relay record that published it. This
+	// is what lets an IPv6 arrival name its PoP and the relay's IPv4.
+	relays map[netip.Addr]*relayInfo
+	// ipNets maps a /24 (v4) or /64 (v6) to a provider tag, derived from
+	// ips. Catches egress addresses sitting next to a published connect
+	// address — common for NordVPN. Tor is deliberately excluded;
+	// neighbours of a Tor exit are not themselves exits.
+	ipNets map[netip.Prefix]string
+	// cidrs is the sorted-range index over published egress ranges.
+	cidrs *cidrIndex
+	ready bool
+}
+
+// netPrefixForIP returns /24 for v4, /64 for v6 — the granularity at which
+// operators typically receive contiguous allocations. The previous /48 was
+// far too wide: one relay painted 2^80 neighbouring addresses as that
+// provider.
 func netPrefixForIP(ip netip.Addr) (netip.Prefix, bool) {
-	ip = normalizeIP(ip)
+	ip = canonicalIP(ip)
 	bits := 24
-	if ip.Is6() && !ip.Is4In6() {
-		bits = 48
+	if ip.Is6() {
+		bits = 64
 	}
 	pfx, err := ip.Prefix(bits)
 	if err != nil {
@@ -82,43 +119,55 @@ func newVPNDB(logger *slog.Logger) *vpnDB {
 		logger: logger,
 		client: &http.Client{Timeout: 30 * time.Second},
 	}
-	// Seed with an empty snapshot so Check() before first refresh is safe.
-	empty := &vpnSnapshot{
-		ips:    map[netip.Addr]string{},
-		ipNets: map[netip.Prefix]string{},
-		dcASN:  datacenterASNs(),
-	}
-	d.snap.Store(empty)
+	// Seed with an empty, explicitly not-ready snapshot so Check() before
+	// the first refresh is safe and honest about knowing nothing.
+	d.snap.Store(&vpnSnapshot{
+		sources: map[string]sourceData{},
+		ips:     map[netip.Addr]string{},
+		relays:  map[netip.Addr]*relayInfo{},
+		ipNets:  map[netip.Prefix]string{},
+		cidrs:   &cidrIndex{},
+	})
 	return d
 }
 
-func (d *vpnDB) Loaded() bool {
+// Ready reports whether at least one provider feed has loaded.
+func (d *vpnDB) Ready() bool {
 	snap := d.snap.Load()
-	return snap != nil && (len(snap.ips) > 0 || len(snap.cidrs) > 0)
+	return snap != nil && snap.ready
 }
 
-// Check classifies an IP. If both ip-list and ASN match, both are reported.
+// Check classifies an address. If both ip-list and ASN match, both are
+// reported.
 func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
-	v := vpnVerdict{}
+	snap := d.snap.Load()
+	v := vpnVerdict{Ready: snap.ready}
 	if !ip.IsValid() {
 		return v
 	}
-	snap := d.snap.Load()
+	ip = canonicalIP(ip)
 
-	if provider, ok := snap.ips[normalizeIP(ip)]; ok {
+	exact := false
+	if provider, ok := snap.ips[ip]; ok {
+		exact = true
 		v.VPN = true
 		v.Provider = provider
 		v.Source = "ip-list"
 		v.Reasons = append(v.Reasons, "matched "+provider+" published server IP")
+		if rel, ok := snap.relays[ip]; ok {
+			v.Relay = rel
+			v.Reasons = append(v.Reasons, "relay "+rel.Label())
+		}
 		if provider == "tor" {
 			v.Tor = true
 			v.Provider = ""
+			v.Relay = nil
 			v.Reasons = []string{"matched Tor exit relay list"}
 		}
 	} else if pfx, ok := netPrefixForIP(ip); ok {
-		// No exact hit — try the /24 (or /48) neighborhood. Many VPN
-		// operators (NordVPN especially) publish connect IPs while
-		// egressing from adjacent addresses in the same allocation.
+		// No exact hit — try the /24 (or /64) neighbourhood. Many VPN
+		// operators publish connect addresses while egressing from
+		// adjacent ones in the same allocation.
 		if provider, hit := snap.ipNets[pfx]; hit && provider != "multi" {
 			v.VPN = true
 			v.Provider = provider
@@ -127,26 +176,33 @@ func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 		}
 	}
 
-	for _, c := range snap.cidrs {
-		if c.prefix.Contains(normalizeIP(ip)) {
+	// Published egress ranges (iCloud Private Relay). Skipped when an exact
+	// server-list hit already classified the address — the lists are
+	// disjoint in practice and this is the expensive probe.
+	if !exact {
+		if provider, ok := snap.cidrs.Lookup(ip); ok {
 			v.VPN = true
 			v.PrivacyProxy = true
-			v.Provider = c.provider
-			if v.Source == "" {
-				v.Source = "cidr"
-			} else {
-				v.Source = v.Source + "+cidr"
-			}
-			v.Reasons = append(v.Reasons, "matched "+c.provider+" egress range "+c.prefix.String())
-			break
+			v.Provider = provider
+			v.Source = appendSource(v.Source, "cidr")
+			v.Reasons = append(v.Reasons, "matched "+provider+" published egress range")
 		}
 	}
 
 	if asn.ASN != 0 {
-		if label, ok := snap.dcASN[asn.ASN]; ok {
-			v.VPN = true
-			v.Source = appendSource(v.Source, "asn")
-			v.Reasons = append(v.Reasons, "ASN AS"+itoa(asn.ASN)+" ("+label+") is a known hosting/VPN-rental network")
+		if tier, ok := datacenterASN(asn.ASN); ok {
+			v.Network = tier.label
+			if tier.rental {
+				v.VPN = true
+				v.Source = appendSource(v.Source, "asn")
+				v.Reasons = append(v.Reasons,
+					"ASN AS"+strconv.Itoa(asn.ASN)+" ("+tier.label+") is a known hosting/VPN-rental network")
+			} else {
+				v.Hosting = true
+				v.Source = appendSource(v.Source, "asn-hosting")
+				v.Reasons = append(v.Reasons,
+					"ASN AS"+strconv.Itoa(asn.ASN)+" ("+tier.label+") is a datacenter network, not a residential ISP")
+			}
 		}
 	}
 
@@ -155,10 +211,13 @@ func (d *vpnDB) Check(ip netip.Addr, asn asnInfo) vpnVerdict {
 
 // Augment layers rDNS and WHOIS signals onto an existing verdict. rDNS is
 // free (the lookup already happened in the request path) and runs always.
-// WHOIS is gated: only when the ASN/prefix layers already raised a flag
-// without identifying the brand — so we don't port-43-bomb every clean
-// residential visitor — or when a strong rDNS hit suggests the IP is worth
-// confirming. Cached for 24h per IP.
+//
+// WHOIS is gated hard. It used to fire whenever the ASN layer flagged an
+// address without naming a brand — but the ASN list includes AWS, Google
+// and Cloudflare, so every unique cloud address triggered a 4s port-43
+// query. That is both a latency cliff and a good way to get the host
+// blocked by a RIR. It now runs only for VPN-rental ASNs, where the answer
+// is actually likely to name a VPN.
 func (d *vpnDB) Augment(ctx context.Context, v vpnVerdict, ip netip.Addr, asn asnInfo, rdns string, wc *whoisCache) vpnVerdict {
 	if v.Tor || v.PrivacyProxy {
 		return v
@@ -171,14 +230,29 @@ func (d *vpnDB) Augment(ctx context.Context, v vpnVerdict, ip netip.Addr, asn as
 		v.Source = appendSource(v.Source, "rdns")
 		v.Reasons = append(v.Reasons, "rDNS "+rdns+" matches "+label)
 	}
-	if wc != nil && v.VPN && v.Provider == "" && asn.ASN != 0 {
-		if label, ok := wc.Lookup(ctx, ip, asn.RIR); ok {
-			v.Provider = label
-			v.Source = appendSource(v.Source, "whois")
-			v.Reasons = append(v.Reasons, "WHOIS identifies "+label)
-		}
+	if wc == nil || v.Provider != "" || asn.ASN == 0 {
+		return v
+	}
+	tier, known := datacenterASN(asn.ASN)
+	if !known || !tier.rental {
+		return v
+	}
+	if label, ok := wc.Lookup(ctx, ip, asn.Prefix, asn.RIR); ok {
+		v.Provider = label
+		v.VPN = true
+		v.Source = appendSource(v.Source, "whois")
+		v.Reasons = append(v.Reasons, "WHOIS identifies "+label)
 	}
 	return v
+}
+
+// LookupRelay returns the relay record publishing this address, if any.
+func (d *vpnDB) LookupRelay(ip netip.Addr) *relayInfo {
+	snap := d.snap.Load()
+	if snap == nil {
+		return nil
+	}
+	return snap.relays[canonicalIP(ip)]
 }
 
 func appendSource(s, more string) string {
@@ -193,12 +267,15 @@ func appendSource(s, more string) string {
 	return s + "+" + more
 }
 
+// ---------- refresh ----------
+
 // runRefreshLoop loads provider lists immediately, then re-loads every 6h.
-// markLoaded is invoked after each successful refresh.
+// markLoaded is invoked after each refresh that leaves us with usable data.
 func (d *vpnDB) runRefreshLoop(ctx context.Context, markLoaded func()) {
 	if err := d.refresh(ctx); err != nil {
 		d.logger.Warn("initial vpn refresh", "err", err)
-	} else {
+	}
+	if d.Ready() {
 		markLoaded()
 	}
 	t := time.NewTicker(6 * time.Hour)
@@ -210,98 +287,160 @@ func (d *vpnDB) runRefreshLoop(ctx context.Context, markLoaded func()) {
 		case <-t.C:
 			if err := d.refresh(ctx); err != nil {
 				d.logger.Warn("vpn refresh", "err", err)
-			} else {
+			}
+			if d.Ready() {
 				markLoaded()
 			}
 		}
 	}
 }
 
+type fetchResult struct {
+	name string
+	data sourceData
+	err  error
+}
+
 func (d *vpnDB) refresh(ctx context.Context) error {
 	d.logger.Info("vpn refresh starting")
 	start := time.Now()
-	defer func() { d.logger.Info("vpn refresh done", "dur_ms", time.Since(start).Milliseconds()) }()
 
-	type ipResult struct {
-		provider string
-		ips      []netip.Addr
-		err      error
+	relayJobs := map[string]func(context.Context) ([]relayInfo, error){
+		"mullvad": d.fetchMullvad,
+		"nordvpn": d.fetchNordVPN,
+		"ivpn":    d.fetchIVPN,
+		"airvpn":  d.fetchAirVPN,
 	}
-	type cidrResult struct {
-		provider string
-		prefixes []netip.Prefix
-		err      error
+	addrJobs := map[string]func(context.Context) ([]netip.Addr, error){
+		"tor": d.fetchTor,
 	}
-
-	ipJobs := []func(context.Context) ([]netip.Addr, error){
-		d.fetchMullvad,
-		d.fetchNordVPN,
-		d.fetchIVPN,
-		d.fetchAirVPN,
-		d.fetchTor,
-	}
-	ipTags := []string{"mullvad", "nordvpn", "ivpn", "airvpn", "tor"}
-
-	cidrJobs := []func(context.Context) ([]netip.Prefix, error){
-		d.fetchICloudPrivateRelay,
-	}
-	cidrTags := []string{"icloud-private-relay"}
-
-	ipCh := make(chan ipResult, len(ipJobs))
-	for i, job := range ipJobs {
-		i, job := i, job
-		go func() {
-			ips, err := job(ctx)
-			ipCh <- ipResult{provider: ipTags[i], ips: ips, err: err}
-		}()
-	}
-	cidrCh := make(chan cidrResult, len(cidrJobs))
-	for i, job := range cidrJobs {
-		i, job := i, job
-		go func() {
-			pfx, err := job(ctx)
-			cidrCh <- cidrResult{provider: cidrTags[i], prefixes: pfx, err: err}
-		}()
+	cidrJobs := map[string]func(context.Context) ([]netip.Prefix, error){
+		"icloud-private-relay": d.fetchICloudPrivateRelay,
 	}
 
-	combinedIPs := make(map[netip.Addr]string, 16384)
-	var combinedCIDRs []cidrEntry
+	total := len(relayJobs) + len(addrJobs) + len(cidrJobs)
+	ch := make(chan fetchResult, total)
+	var wg sync.WaitGroup
+
+	for name, job := range relayJobs {
+		wg.Add(1)
+		go func(name string, job func(context.Context) ([]relayInfo, error)) {
+			defer wg.Done()
+			rs, err := job(ctx)
+			ch <- fetchResult{name: name, data: sourceData{relays: rs}, err: err}
+		}(name, job)
+	}
+	for name, job := range addrJobs {
+		wg.Add(1)
+		go func(name string, job func(context.Context) ([]netip.Addr, error)) {
+			defer wg.Done()
+			as, err := job(ctx)
+			ch <- fetchResult{name: name, data: sourceData{addrs: as}, err: err}
+		}(name, job)
+	}
+	for name, job := range cidrJobs {
+		wg.Add(1)
+		go func(name string, job func(context.Context) ([]netip.Prefix, error)) {
+			defer wg.Done()
+			ps, err := job(ctx)
+			ch <- fetchResult{name: name, data: sourceData{cidrs: ps}, err: err}
+		}(name, job)
+	}
+	wg.Wait()
+	close(ch)
+
+	prev := d.snap.Load()
+	sources := make(map[string]sourceData, total)
+	for k, v := range prev.sources {
+		sources[k] = v
+	}
+
 	var errs []error
-	totalJobs := len(ipJobs) + len(cidrJobs)
-	successes := 0
-
-	for range ipJobs {
-		r := <-ipCh
-		if r.err != nil {
-			d.logger.Warn("vpn provider fetch", "provider", r.provider, "err", r.err)
+	fresh := 0
+	for r := range ch {
+		switch {
+		case r.err != nil:
+			d.logger.Warn("vpn source fetch failed, keeping previous data",
+				"source", r.name, "err", r.err, "had_previous", !sources[r.name].empty())
 			errs = append(errs, r.err)
-			continue
-		}
-		d.logger.Info("vpn provider loaded", "provider", r.provider, "ips", len(r.ips))
-		successes++
-		for _, ip := range r.ips {
-			combinedIPs[normalizeIP(ip)] = r.provider
-		}
-	}
-	for range cidrJobs {
-		r := <-cidrCh
-		if r.err != nil {
-			d.logger.Warn("vpn cidr fetch", "provider", r.provider, "err", r.err)
-			errs = append(errs, r.err)
-			continue
-		}
-		d.logger.Info("vpn cidr loaded", "provider", r.provider, "ranges", len(r.prefixes))
-		successes++
-		for _, p := range r.prefixes {
-			combinedCIDRs = append(combinedCIDRs, cidrEntry{prefix: p, provider: r.provider})
+		case r.data.empty():
+			// A syntactically valid but empty payload is a feed outage, not
+			// "this provider has no servers". Treat it as a failure so we
+			// don't erase good data on a 200-with-[] response.
+			d.logger.Warn("vpn source returned no entries, keeping previous data", "source", r.name)
+			errs = append(errs, errors.New(r.name+": empty payload"))
+		default:
+			r.data.fetched = time.Now()
+			sources[r.name] = r.data
+			fresh++
+			d.logger.Info("vpn source loaded", "source", r.name,
+				"relays", len(r.data.relays), "addrs", len(r.data.addrs), "cidrs", len(r.data.cidrs))
 		}
 	}
 
-	// Derive /24-or-/48 prefix map from the IP-list. Skip Tor (neighbors
-	// of an exit are not themselves exits). If two providers share a
+	snap := buildSnapshot(sources)
+	d.snap.Store(snap)
+	d.logger.Info("vpn refresh done",
+		"dur_ms", time.Since(start).Milliseconds(),
+		"fresh_sources", fresh, "total_sources", total,
+		"ips", len(snap.ips), "relays", len(snap.relays),
+		"cidr_ranges", snap.cidrs.Len(), "ready", snap.ready)
+
+	if fresh == 0 && total > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// buildSnapshot derives every lookup index from the per-source data.
+func buildSnapshot(sources map[string]sourceData) *vpnSnapshot {
+	snap := &vpnSnapshot{
+		sources: sources,
+		ips:     make(map[netip.Addr]string, 16384),
+		relays:  make(map[netip.Addr]*relayInfo, 16384),
+		ipNets:  make(map[netip.Prefix]string, 16384),
+	}
+	var cidrs []cidrEntry
+
+	// Iterate in a fixed order so that an address appearing in two feeds
+	// always resolves the same way across restarts. Map order would make
+	// the winner depend on nothing in particular.
+	names := make([]string, 0, len(sources))
+	for name := range sources {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		src := sources[name]
+		for i := range src.relays {
+			rel := &src.relays[i]
+			for _, a := range rel.addrs {
+				snap.ips[a] = rel.Provider
+				snap.relays[a] = rel
+			}
+		}
+		for _, p := range src.cidrs {
+			cidrs = append(cidrs, cidrEntry{prefix: p, provider: name})
+		}
+		if !src.empty() {
+			snap.ready = true
+		}
+	}
+	// Tor last and unconditionally: an address that is a Tor exit is a Tor
+	// exit even if some VPN feed also lists it, and Check() treats the two
+	// very differently.
+	for _, name := range names {
+		for _, a := range sources[name].addrs {
+			a = canonicalIP(a)
+			snap.ips[a] = name
+			delete(snap.relays, a)
+		}
+	}
+
+	// Derive the neighbourhood map. Skip Tor. If two providers share a
 	// prefix, mark "multi" so Check() ignores it rather than guessing.
-	combinedNets := make(map[netip.Prefix]string, len(combinedIPs))
-	for ip, prov := range combinedIPs {
+	for ip, prov := range snap.ips {
 		if prov == "tor" {
 			continue
 		}
@@ -309,29 +448,20 @@ func (d *vpnDB) refresh(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if existing, present := combinedNets[pfx]; present && existing != prov {
-			combinedNets[pfx] = "multi"
+		if existing, present := snap.ipNets[pfx]; present && existing != prov {
+			snap.ipNets[pfx] = "multi"
 		} else if !present {
-			combinedNets[pfx] = prov
+			snap.ipNets[pfx] = prov
 		}
 	}
 
-	d.snap.Store(&vpnSnapshot{
-		ips:    combinedIPs,
-		ipNets: combinedNets,
-		cidrs:  combinedCIDRs,
-		dcASN:  datacenterASNs(),
-	})
-
-	if successes == 0 && totalJobs > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
+	snap.cidrs = buildCIDRIndex(cidrs)
+	return snap
 }
 
-// ---------- providers ----------
+// ---------- feed transport ----------
 
-func (d *vpnDB) get(ctx context.Context, url string) ([]byte, error) {
+func (d *vpnDB) get(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -345,154 +475,46 @@ func (d *vpnDB) get(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode/100 != 2 {
 		return nil, errors.New("status " + resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
-}
-
-// Mullvad: https://api.mullvad.net/www/relays/all/
-// JSON array; ipv4_addr_in / ipv6_addr_in per relay.
-func (d *vpnDB) fetchMullvad(ctx context.Context) ([]netip.Addr, error) {
-	body, err := d.get(ctx, "https://api.mullvad.net/www/relays/all/")
+	// Read one byte past the limit so an oversized body is reported rather
+	// than silently truncated into a parse error.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	var relays []struct {
-		IPv4 string `json:"ipv4_addr_in"`
-		IPv6 string `json:"ipv6_addr_in"`
+	if int64(len(body)) > limit {
+		return nil, errors.New("response exceeds " + strconv.FormatInt(limit, 10) + " byte limit")
 	}
-	if err := json.Unmarshal(body, &relays); err != nil {
-		return nil, err
-	}
-	out := make([]netip.Addr, 0, len(relays)*2)
-	for _, r := range relays {
-		if a, err := netip.ParseAddr(r.IPv4); err == nil {
-			out = append(out, a)
-		}
-		if a, err := netip.ParseAddr(r.IPv6); err == nil {
-			out = append(out, a)
-		}
-	}
-	return out, nil
-}
-
-// NordVPN: https://api.nordvpn.com/v1/servers?limit=10000
-// Each server has `station` (v4) and `ipv6_station`.
-func (d *vpnDB) fetchNordVPN(ctx context.Context) ([]netip.Addr, error) {
-	body, err := d.get(ctx, "https://api.nordvpn.com/v1/servers?limit=10000")
-	if err != nil {
-		return nil, err
-	}
-	var servers []struct {
-		Station     string `json:"station"`
-		IPv6Station string `json:"ipv6_station"`
-	}
-	if err := json.Unmarshal(body, &servers); err != nil {
-		return nil, err
-	}
-	out := make([]netip.Addr, 0, len(servers)*2)
-	for _, s := range servers {
-		if a, err := netip.ParseAddr(s.Station); err == nil {
-			out = append(out, a)
-		}
-		if a, err := netip.ParseAddr(s.IPv6Station); err == nil {
-			out = append(out, a)
-		}
-	}
-	return out, nil
-}
-
-// iVPN: https://api.ivpn.net/v5/servers.json
-// Top-level keys: wireguard / openvpn, each with [].hosts[].host (v4)
-// and optional ipv6.local_ip (we want the public host only).
-func (d *vpnDB) fetchIVPN(ctx context.Context) ([]netip.Addr, error) {
-	body, err := d.get(ctx, "https://api.ivpn.net/v5/servers.json")
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		Wireguard []struct {
-			Hosts []struct {
-				Host string `json:"host"`
-			} `json:"hosts"`
-		} `json:"wireguard"`
-		OpenVPN []struct {
-			Hosts []struct {
-				Host string `json:"host"`
-			} `json:"hosts"`
-		} `json:"openvpn"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
-	}
-	var out []netip.Addr
-	for _, g := range doc.Wireguard {
-		for _, h := range g.Hosts {
-			if a, err := netip.ParseAddr(h.Host); err == nil {
-				out = append(out, a)
-			}
-		}
-	}
-	for _, g := range doc.OpenVPN {
-		for _, h := range g.Hosts {
-			if a, err := netip.ParseAddr(h.Host); err == nil {
-				out = append(out, a)
-			}
-		}
-	}
-	return out, nil
-}
-
-// AirVPN: https://airvpn.org/api/status/
-// servers[].ip_v4_in1, ip_v4_in2, ip_v4_in3, ip_v4_in4 (newer schema).
-func (d *vpnDB) fetchAirVPN(ctx context.Context) ([]netip.Addr, error) {
-	body, err := d.get(ctx, "https://airvpn.org/api/status/")
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		Servers []map[string]any `json:"servers"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
-	}
-	out := make([]netip.Addr, 0, len(doc.Servers)*2)
-	for _, srv := range doc.Servers {
-		for k, v := range srv {
-			if !strings.HasPrefix(k, "ip_v4_in") && !strings.HasPrefix(k, "ip_v6_in") {
-				continue
-			}
-			s, ok := v.(string)
-			if !ok || s == "" {
-				continue
-			}
-			if a, err := netip.ParseAddr(s); err == nil {
-				out = append(out, a)
-			}
-		}
-	}
-	return out, nil
+	return body, nil
 }
 
 // iCloud Private Relay: Apple publishes egress ranges as CSV.
 // https://mask-api.icloud.com/egress-ip-ranges.csv
 // Each line: <prefix>,<country>,<region>,<city>
-// e.g. "172.225.176.0/20,US,US-NY,New York"
 //
-// Apple's Private Relay is structurally a privacy proxy (two-hop through
+// Private Relay is structurally a privacy proxy (two-hop through
 // CF/Akamai/Fastly egress), so flagging traffic from these ranges is
-// genuinely correct — the IP doesn't reflect the user's real location.
+// genuinely correct — the address doesn't reflect the user's real location.
 func (d *vpnDB) fetchICloudPrivateRelay(ctx context.Context) ([]netip.Prefix, error) {
-	body, err := d.get(ctx, "https://mask-api.icloud.com/egress-ip-ranges.csv")
+	body, err := d.get(ctx, "https://mask-api.icloud.com/egress-ip-ranges.csv", 32<<20)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]netip.Prefix, 0, 256)
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	out := make([]netip.Prefix, 0, 300_000)
+	for len(body) > 0 {
+		var line []byte
+		if i := indexByte(body, '\n'); i >= 0 {
+			line, body = body[:i], body[i+1:]
+		} else {
+			line, body = body, nil
+		}
+		s := strings.TrimSpace(string(line))
+		if s == "" || strings.HasPrefix(s, "#") {
 			continue
 		}
-		field := strings.SplitN(line, ",", 2)[0]
-		p, err := netip.ParsePrefix(field)
+		if i := strings.IndexByte(s, ','); i >= 0 {
+			s = s[:i]
+		}
+		p, err := netip.ParsePrefix(s)
 		if err != nil {
 			continue
 		}
@@ -502,9 +524,9 @@ func (d *vpnDB) fetchICloudPrivateRelay(ctx context.Context) ([]netip.Prefix, er
 }
 
 // Tor: https://check.torproject.org/torbulkexitlist
-// Newline-separated IPv4 list of exit relays.
+// Newline-separated list of exit relays.
 func (d *vpnDB) fetchTor(ctx context.Context) ([]netip.Addr, error) {
-	body, err := d.get(ctx, "https://check.torproject.org/torbulkexitlist")
+	body, err := d.get(ctx, "https://check.torproject.org/torbulkexitlist", 8<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -521,61 +543,38 @@ func (d *vpnDB) fetchTor(ctx context.Context) ([]netip.Addr, error) {
 	return out, nil
 }
 
-// normalizeIP collapses 4-in-6 representations so lookups match.
-func normalizeIP(a netip.Addr) netip.Addr {
-	if a.Is4In6() {
-		return a.Unmap()
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
 	}
-	return a
+	return -1
 }
 
-func itoa(n int) string {
-	// Tiny local helper to avoid pulling in strconv just for this.
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+// ---------- datacenter ASNs ----------
+
+// asnTier describes what an ASN match actually tells us. rental means VPN
+// operators are known to egress there, so vpn:true and a WHOIS probe are
+// both justified. Otherwise it is simply a datacenter: hosting:true, and no
+// claim that a VPN is involved.
+type asnTier struct {
+	label  string
+	rental bool
 }
 
-// datacenterASNs is a curated list of hosting/VPN-rental ASNs.
-// Picked to flag the providers that don't publish server lists
-// (ExpressVPN, ProtonVPN, Surfshark, PIA, CyberGhost, etc.) and the
-// general "this is clearly a datacenter, not a residential ISP" case.
-//
-// Not exhaustive — that's a never-ending battle. Aim is high precision:
-// every entry here is a network where consumer traffic has a real-world
-// reason to be flagged.
-func datacenterASNs() map[int]string {
-	return map[int]string{
-		// Top VPN-rental hosters.
-		9009:   "M247",             // hosts ExpressVPN, PIA, Surfshark, many more
-		60068:  "Datacamp / CDN77", // CyberGhost, others
+// datacenterASNs is a curated list of hosting / VPN-rental ASNs, built once.
+// Not exhaustive — that's a never-ending battle. Aim is high precision.
+var datacenterASNs = func() map[int]asnTier {
+	rental := map[int]string{
+		9009:   "M247", // hosts ExpressVPN, PIA, Surfshark, many more
+		60068:  "Datacamp / CDN77",
 		200651: "Flokinet",
 		20473:  "Choopa / Vultr",
 		16276:  "OVH",
 		24940:  "Hetzner",
 		14061:  "DigitalOcean",
 		63949:  "Akamai / Linode",
-		396982: "Google Cloud",
-		15169:  "Google",
-		8075:   "Microsoft Azure",
-		16509:  "Amazon AWS",
-		14618:  "Amazon AWS",
 		36352:  "ColoCrossing",
 		29802:  "HVC / Quadranet",
 		40676:  "Psychz Networks",
@@ -591,22 +590,36 @@ func datacenterASNs() map[int]string {
 		200019: "AlexHost",
 		206264: "Amarutu Technology",
 		211252: "Delis LLC",
-		// "Definitely a datacenter, not residential" tier.
-		13335: "Cloudflare",
-		31898: "Oracle Cloud",
-		23470: "ReliableSite",
-		36351: "SoftLayer / IBM Cloud",
-		// Datapacket — major VPN-rental upstream (NordVPN, ExpressVPN partner).
-		212238: "Datapacket / CDN77",
-		// Internetbolaget / Packethub — hosts NordVPN, OVPN, others (SE).
-		51747: "Internetbolaget / Packethub",
-		// Stark Industries — common VPN/proxy egress.
-		44477: "Stark Industries",
-		// Netrouting (NL) — AirVPN egress, also used by other VPN providers.
-		6206: "Netrouting",
-		// GSL Networks (AU) — hosts Packethub-assigned NordVPN ranges and
-		// other VPN-rental capacity. WHOIS netname like "PACKETHUB-*" then
-		// resolves the brand.
-		137409: "GSL Networks",
+		23470:  "ReliableSite",
+		212238: "Datapacket / CDN77",          // major VPN-rental upstream
+		51747:  "Internetbolaget / Packethub", // NordVPN, OVPN (SE)
+		44477:  "Stark Industries",
+		6206:   "Netrouting",   // AirVPN egress
+		137409: "GSL Networks", // Packethub-assigned NordVPN ranges (AU)
 	}
+	// Datacenters, but not places VPNs characteristically egress. Calling
+	// these vpn:true buried real detections under cloud and CDN traffic.
+	hosting := map[int]string{
+		396982: "Google Cloud",
+		15169:  "Google",
+		8075:   "Microsoft Azure",
+		16509:  "Amazon AWS",
+		14618:  "Amazon AWS",
+		13335:  "Cloudflare",
+		31898:  "Oracle Cloud",
+		36351:  "SoftLayer / IBM Cloud",
+	}
+	out := make(map[int]asnTier, len(rental)+len(hosting))
+	for asn, label := range rental {
+		out[asn] = asnTier{label: label, rental: true}
+	}
+	for asn, label := range hosting {
+		out[asn] = asnTier{label: label}
+	}
+	return out
+}()
+
+func datacenterASN(asn int) (asnTier, bool) {
+	t, ok := datacenterASNs[asn]
+	return t, ok
 }

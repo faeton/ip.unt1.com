@@ -415,8 +415,8 @@
   </div>
   <div style="display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap;">
     <button class="design-swap" type="button" onclick="document.cookie='style=classic; max-age=31536000; path=/; samesite=lax'; location.reload();">↺ Classic design</button>
-    <form class="search" action="/" method="get" role="search" onsubmit="var v=this.q.value.trim(); if(!v) return false; window.location='/'+encodeURIComponent(v); return false;">
-      <input name="q" type="text" placeholder="QUERY ANOTHER IP…" autocomplete="off" spellcheck="false">
+    <form class="search" action="/" method="get" role="search" onsubmit="var v=this.ip.value.trim(); if(!v) return false; window.location='/ip/'+encodeURIComponent(v); return false;">
+      <input name="ip" type="text" placeholder="QUERY ANOTHER IP…" autocomplete="off" spellcheck="false">
     </form>
   </div>
 </header>
@@ -452,6 +452,7 @@
         <span class="label">Country</span>
         <span class="value lg">
           {{if .Country}}{{if .CountryFlag}}<span class="flag">{{.CountryFlag}}</span>{{end}}{{.Country}}{{else}}<span class="dim">—</span>{{end}}
+          {{if .CountrySource}}<span class="small" title="Cloudflare&rsquo;s answer depends on the address family you reached us over, so the IPv4 and IPv6 answers can differ.">{{if eq .CountrySource "cf"}}via Cloudflare edge{{else if eq .CountrySource "rir"}}via RIR registration{{else}}via VPN operator record{{end}}</span>{{end}}
         </span>
       </div>
       <div class="data">
@@ -519,6 +520,22 @@
         <span class="label">PTR</span>
         <span class="value mono">{{if .Reverse}}{{.Reverse}}{{else}}<span class="dim">— no PTR record</span>{{end}}</span>
       </div>
+      {{if .PoP}}
+      <div class="data">
+        <span class="label">Exit node</span>
+        <span class="value mono">{{.PoP}}
+          <span class="small">{{.PoPProvider}}{{if .PoPCity}} &middot; {{.PoPCity}}{{if .PoPCountry}}, {{.PoPCountry}}{{end}}{{end}}{{if .PoPHost}} &middot; hosted by {{.PoPHost}}{{end}}</span>
+        </span>
+      </div>
+      {{end}}
+      {{if .OtherFamily}}
+      <div class="data">
+        <span class="label">Same exit, {{if eq .Version "v6"}}IPv4{{else}}IPv6{{end}}</span>
+        <span class="value mono">{{.OtherFamily}}
+          <span class="small">this relay&rsquo;s address in the other family &middot; not necessarily yours</span>
+        </span>
+      </div>
+      {{end}}
       {{if and .Ray (not .IsLookup)}}
       <div class="data">
         <span class="label">CF Ray</span>

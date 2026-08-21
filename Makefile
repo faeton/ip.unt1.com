@@ -1,6 +1,6 @@
 BIN     := bin/ipunt1
 SRC     := $(shell find . -name '*.go') web/index.html web/index-swiss.html
-HOST    ?= on1
+HOST    ?= de1
 REMOTE_BIN := /usr/local/bin/ipunt1
 LDFLAGS := -s -w
 
@@ -29,7 +29,7 @@ fmt:
 vet:
 	go vet ./...
 
-# Cross-compile for on1 (linux/amd64).
+# Cross-compile for de1 (linux/amd64).
 linux:
 	mkdir -p dist
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/ipunt1-linux-amd64 .

@@ -12,18 +12,20 @@ package main
 // Org name:    AS<num>.asn.cymru.com TXT
 //   answer:    "13335 | US | arin | 2010-07-14 | CLOUDFLARENET, US"
 //
-// Cymru is the canonical free source for this. We cache aggressively
-// since ASN ownership shifts on the order of weeks, not seconds.
+// Cymru is the canonical free source for this. We cache aggressively since
+// ASN ownership shifts on the order of weeks, not seconds — but a lookup
+// that *failed* is cached only briefly. Previously any DNS blip was stored
+// as an authoritative "no ASN" for 12 hours.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -36,87 +38,107 @@ type asnInfo struct {
 	Country   string // RIR-registered country code (may differ from CF-IPCountry)
 }
 
-type asnEntry struct {
-	info    asnInfo
-	expires time.Time
+const (
+	asnCacheTTL = 12 * time.Hour
+	// A failed lookup is retried soon; a successful one that simply had no
+	// answer still gets the long TTL.
+	asnErrorTTL = 60 * time.Second
+	// Entry cap. /ip/{addr} lets anyone name arbitrary addresses, so an
+	// unbounded map was a memory-exhaustion lever against a 512M unit.
+	asnCacheMax = 50_000
+	orgCacheMax = 8_192
+)
+
+// asnResult distinguishes "we asked and got nothing" from "we couldn't ask".
+type asnResult struct {
+	info asnInfo
+	ok   bool
 }
 
 type asnResolver struct {
 	logger   *slog.Logger
 	resolver *net.Resolver
-	mu       sync.RWMutex
-	cache    map[string]asnEntry
+	cache    *ttlCache[asnResult]
+	orgs     *ttlCache[string]
 }
 
 func newASNResolver(logger *slog.Logger) *asnResolver {
 	return &asnResolver{
 		logger:   logger,
 		resolver: net.DefaultResolver,
-		cache:    make(map[string]asnEntry, 1024),
+		cache:    newTTLCache[asnResult](asnCacheMax),
+		orgs:     newTTLCache[string](orgCacheMax),
 	}
 }
-
-const asnCacheTTL = 12 * time.Hour
 
 func (a *asnResolver) Lookup(ctx context.Context, ip netip.Addr) asnInfo {
-	if !ip.IsValid() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+	ip = canonicalIP(ip)
+	if !isRoutable(ip) {
 		return asnInfo{}
 	}
-	key := ip.String()
-
-	a.mu.RLock()
-	if e, ok := a.cache[key]; ok && time.Now().Before(e.expires) {
-		a.mu.RUnlock()
-		return e.info
-	}
-	a.mu.RUnlock()
-
-	info := a.resolve(ctx, ip)
-
-	a.mu.Lock()
-	a.cache[key] = asnEntry{info: info, expires: time.Now().Add(asnCacheTTL)}
-	a.mu.Unlock()
-	return info
+	res := a.cache.Do(ip.String(), func() (asnResult, time.Duration) {
+		r := a.resolve(ctx, ip)
+		if !r.ok {
+			return r, asnErrorTTL
+		}
+		return r, asnCacheTTL
+	})
+	return res.info
 }
 
-func (a *asnResolver) resolve(ctx context.Context, ip netip.Addr) asnInfo {
-	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+func (a *asnResolver) resolve(ctx context.Context, ip netip.Addr) asnResult {
+	lookupCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 
 	var qname string
-	if ip.Is4() || ip.Is4In6() {
+	if ip.Is4() {
 		v4 := ip.As4()
 		qname = fmt.Sprintf("%d.%d.%d.%d.origin.asn.cymru.com", v4[3], v4[2], v4[1], v4[0])
 	} else {
 		qname = nibbleReverseV6(ip) + ".origin6.asn.cymru.com"
 	}
 
-	txts, err := a.resolver.LookupTXT(ctx, qname)
-	if err != nil || len(txts) == 0 {
+	txts, err := a.resolver.LookupTXT(lookupCtx, qname)
+	if err != nil {
+		// NXDOMAIN is a real answer ("this address has no origin AS");
+		// anything else is our problem and shouldn't be cached for 12h.
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return asnResult{ok: true}
+		}
 		a.logger.Debug("cymru origin lookup failed", "ip", ip, "err", err)
-		return asnInfo{}
+		return asnResult{}
+	}
+	if len(txts) == 0 {
+		return asnResult{ok: true}
 	}
 	// origin response: "ASN | prefix | country | rir | allocated"
 	info := parseOriginTXT(txts[0])
 	if info.ASN == 0 {
-		return asnInfo{}
+		return asnResult{ok: true}
 	}
+	// Org lookup gets its own budget rather than whatever is left of the
+	// origin query's 1.5s, and is cached per-AS — many addresses share one.
 	info.Org = a.lookupOrg(ctx, info.ASN)
-	return info
+	return asnResult{info: info, ok: true}
 }
 
 func (a *asnResolver) lookupOrg(ctx context.Context, asn int) string {
-	qname := fmt.Sprintf("AS%d.asn.cymru.com", asn)
-	txts, err := a.resolver.LookupTXT(ctx, qname)
-	if err != nil || len(txts) == 0 {
-		return ""
-	}
-	// org response: "ASN | country | rir | allocated | ORGNAME, CC"
-	parts := strings.Split(txts[0], "|")
-	if len(parts) < 5 {
-		return ""
-	}
-	return strings.TrimSpace(parts[4])
+	return a.orgs.Do(strconv.Itoa(asn), func() (string, time.Duration) {
+		lookupCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+		defer cancel()
+		qname := fmt.Sprintf("AS%d.asn.cymru.com", asn)
+		txts, err := a.resolver.LookupTXT(lookupCtx, qname)
+		if err != nil || len(txts) == 0 {
+			return "", asnErrorTTL
+		}
+		// org response: "ASN | country | rir | allocated | ORGNAME, CC"
+		parts := strings.Split(txts[0], "|")
+		if len(parts) < 5 {
+			return "", asnCacheTTL
+		}
+		return strings.TrimSpace(parts[4]), asnCacheTTL
+	})
 }
 
 func parseOriginTXT(txt string) asnInfo {

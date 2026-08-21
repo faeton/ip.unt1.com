@@ -14,7 +14,7 @@ Roadmap for ip.unt1.com. Tracked here so the next session has the same picture.
 ## v1 (shipped)
 
 - [x] Go HTTP service replacing static Caddy block
-- [x] Topology: CF orange-cloud → Caddy on on1 → 127.0.0.1:8080 (systemd hardened unit)
+- [x] Topology: CF orange-cloud → Caddy on de1 → 127.0.0.1:8080 (systemd hardened unit)
 - [x] Routes: `/`, `/json`, `/vpn`, `/headers`, `/all`, `/ua`, `/reverse`, `/health`
 - [x] Content negotiation: plain for curl, HTML for browsers
 - [x] ASN resolution via Team Cymru DNS whois (no MaxMind license)
@@ -52,10 +52,16 @@ Roadmap for ip.unt1.com. Tracked here so the next session has the same picture.
   - Wildcard DNS: `*.dnstest.unt1.com` pointing to a small UDP listener that logs resolver IPs
   - Page fetches a random subdomain via `<img>` or `fetch`, then queries `/dns-leak/<token>` to retrieve the resolver(s) we saw
   - True diagnostic, on par with dnsleaktest.com
-- [ ] **IPv4 + IPv6 dual display**
-  - Host on `ip4.unt1.com` (A-only) and `ip6.unt1.com` (AAAA-only)
-  - JS on the main page fetches both via JSON, shows side-by-side
-  - Visually answers "do I have IPv6?" instantly
+- [~] **IPv4 + IPv6 dual display**
+  - [-] Separate `ip4.` / `ip6.` hostnames — declined, no new subdomains.
+  - [x] Derive instead of measure: relay records now carry the exit's
+    hostname/city/country and both address families, so an IPv6 arrival gets
+    its PoP and the relay's IPv4 without a second hostname (`pop*` fields).
+  - [x] `country_source` makes the v4/v6 country disagreement legible.
+  - [ ] Remaining gap: for non-VPN clients the other family is still
+    unknowable from one hostname. Options are a v4-only host, a v4-only
+    third party for address discovery only (`ipv4.icanhazip.com` is v4-only
+    and CORS-open), or a client that pins the family itself.
 - [ ] **DNSBL check** — Spamhaus ZEN, SORBS, etc. (DNS queries)
 - [ ] **Clock skew** — client posts `Date.now()`, server compares; surface drift
 - [ ] **Cloudflare WARP detection** — needs published egress list (or Worker hint via `cf.warp_proxy`); CF doesn't make this clean for non-Worker origins
@@ -68,14 +74,14 @@ Roadmap for ip.unt1.com. Tracked here so the next session has the same picture.
 - [ ] **HTTP/2 fingerprint (Akamai)** — same architectural concern
 - [ ] **Reverse-connect probe** — server attempts back-connection to detect open ports / NAT type. Mild abuse-vector concern; rate-limit
 - [ ] **Anycast detection** — measure CF colo variance per-request from the same client over time
-- [ ] **Speed test / RTT graph via WebSocket** — niche, bandwidth burden on on1
+- [ ] **Speed test / RTT graph via WebSocket** — niche, bandwidth burden on de1
 
 ---
 
 ## What we deliberately won't build
 
 - Canvas / WebGL / font / audio fingerprinting — privacy-aggressive, browserleaks.com already does this exhaustively
-- Full bandwidth speed test — wrong scope, would dominate on1's bandwidth
+- Full bandwidth speed test — wrong scope, would dominate de1's bandwidth
 - Persistent visit history / cookies — privacy concern, no real benefit
 - Paid-tier features (premium GeoIP, abuse contact databases, etc.) — keeps the project free + self-hosted
 
@@ -91,12 +97,16 @@ Roadmap for ip.unt1.com. Tracked here so the next session has the same picture.
 
 ## Performance / memory
 
-- iCloud Private Relay range list is ~286k /27-/31 prefixes. Currently stored as a flat `[]netip.Prefix` and linear-scanned per request (~6ms / 286k Contains calls).
-- A sorted-by-network-address slice with binary search would be O(log n) ≈ 18 comparisons.
-- A 32-bit binary trie is even faster but more code.
+- [x] iCloud Private Relay range list (~288k /27-/31 prefixes) is no longer
+  linear-scanned. Prefixes are converted to ranges, sorted and merged at
+  refresh time: 287,807 prefixes collapse to 6,873 disjoint ranges, and
+  lookup is a binary search. Benchmarked 974,000 ns → 89 ns.
+- The CIDR probe is also skipped entirely when an exact server-list hit has
+  already classified the address.
 - Memory: bumped systemd limits to MemoryHigh=256M / MemoryMax=512M after first deploy hit the previous 128M ceiling.
 
 ## Known precision tradeoffs
 
-- AS15169 (Google) is in the datacenter list — flags real Google traffic as "VPN/datacenter". Correct in spirit (non-residential), but the wording in the verdict could be more nuanced.
+- [x] AS15169 (Google) and the other hyperscalers now report `hosting: true`
+  with `vpn: false`, and render as "Hosting" rather than "VPN".
 - Surfshark / ExpressVPN / ProtonVPN: caught via ASN only (they don't publish IPs cleanly). False negative possible if they rent from an ASN we don't flag.

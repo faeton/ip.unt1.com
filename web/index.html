@@ -550,6 +550,7 @@
           {{if .Country}}
             {{if .CountryFlag}}<span class="flag">{{.CountryFlag}}</span>{{end}}{{.Country}}
           {{else}}<span style="color:var(--muted-2)">—</span>{{end}}
+          {{if .CountrySource}}<small title="Where this country came from. Cloudflare&rsquo;s answer depends on the address family you reached us over, so the IPv4 and IPv6 answers can differ.">{{if eq .CountrySource "cf"}}via Cloudflare edge{{else if eq .CountrySource "rir"}}via RIR registration{{else}}via VPN operator record{{end}}</small>{{end}}
         </div>
       </div>
       <div class="cell">
@@ -593,6 +594,24 @@
         <div class="k">reverse</div>
         <div class="v">{{if .Reverse}}{{.Reverse}}{{else}}<span class="dim">— no PTR record</span>{{end}}</div>
       </div>
+      {{if .PoP}}
+      <div class="row">
+        <div class="k">exit node</div>
+        <div class="v">
+          {{.PoP}}
+          <small>{{.PoPProvider}}{{if .PoPCity}} &middot; {{.PoPCity}}{{if .PoPCountry}}, {{.PoPCountry}}{{end}}{{end}}{{if .PoPHost}} &middot; hosted by {{.PoPHost}}{{end}}</small>
+        </div>
+      </div>
+      {{end}}
+      {{if .OtherFamily}}
+      <div class="row">
+        <div class="k">same exit, {{if eq .Version "v6"}}IPv4{{else}}IPv6{{end}}</div>
+        <div class="v">
+          {{.OtherFamily}}
+          <small>this relay&rsquo;s address in the other family &middot; not necessarily yours, and a single hostname cannot measure yours directly</small>
+        </div>
+      </div>
+      {{end}}
       {{if and .Ray (not .IsLookup)}}
       <div class="row">
         <div class="k">cf ray</div>

@@ -1,6 +1,6 @@
 // ip.unt1.com — IP echo + VPN/proxy detection.
 //
-// Topology: Cloudflare (orange-cloud) → Caddy on on1 → this binary on 127.0.0.1.
+// Topology: Cloudflare (orange-cloud) → Caddy on de1 → this binary on 127.0.0.1.
 // Real client IP rides CF-Connecting-IP. Country rides CF-IPCountry. ASN we
 // resolve ourselves via Team Cymru DNS whois (free, public, no DB).
 //
@@ -39,6 +39,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -97,6 +98,9 @@ type server struct {
 	// bots/scrapers (curiosity / abuse).
 	uaUnknownSeen *uaSeenSet
 	uaBotSeen     *uaSeenSet
+	// lookupLimit throttles third-party /ip/{addr} and ?ip= lookups only;
+	// self-lookups are unmetered.
+	lookupLimit *rateLimiter
 }
 
 func main() {
@@ -123,10 +127,16 @@ func main() {
 		logger:        logger,
 		uaUnknownSeen: newUASeenSet(1024, 6*time.Hour),
 		uaBotSeen:     newUASeenSet(1024, 6*time.Hour),
+		// ~1 lookup/sec sustained, 30 back-to-back. A person pasting
+		// addresses into the lookup box never reaches this.
+		lookupLimit: newRateLimiter(1, 30, 20_000),
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", srv.handleRoot)
+	// "GET /{$}" matches only the root. The bare "GET /" pattern is a
+	// catch-all: it made every unknown path answer 200 with the requester's
+	// address, so a typo like /8.8.8.8 looked like a successful lookup.
+	mux.HandleFunc("GET /{$}", srv.handleRoot)
 	mux.HandleFunc("GET /ip/{addr}", srv.handleRoot)
 	mux.HandleFunc("GET /json", srv.handleJSON)
 	mux.HandleFunc("GET /country", srv.handleCountry)
@@ -140,10 +150,23 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	// /health is liveness and always says ok. Readiness is separate: it is
+	// false until a provider list loads, which is exactly the window in
+	// which every address would otherwise be reported as clean.
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !srv.vpn.Ready() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("vpn detection lists not loaded\n"))
+			return
+		}
+		_, _ = w.Write([]byte("ready\n"))
+	})
 
 	httpSrv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           withRequestLog(logger, mux),
+		MaxHeaderBytes:    32 << 10,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -164,7 +187,7 @@ func main() {
 		logger.Info("listening", "addr", cfg.addr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("http server", "err", err)
-			os.Exit(1)
+			cancel()
 		}
 	}()
 
@@ -205,9 +228,17 @@ func (s *server) inspect(r *http.Request) requestInfo {
 		info.CFRay = strings.TrimSpace(r.Header.Get("CF-Ray"))
 	}
 	if info.IPRaw == "" {
-		// Fall back to first XFF entry, then RemoteAddr.
-		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			info.IPRaw = strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+		// X-Real-IP is set by Caddy from the connecting peer, so a client
+		// cannot forge it. The left-most X-Forwarded-For entry *is*
+		// client-supplied — Caddy appends the real hop rather than
+		// replacing the header — so it is deliberately no longer consulted.
+		//
+		// Note this only closes the in-process half of the problem. If
+		// de1's origin address is reachable directly, a caller can still
+		// present their own CF-* headers; restricting Caddy to Cloudflare
+		// ranges (or requiring authenticated origin pulls) is the other half.
+		if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+			info.IPRaw = v
 		}
 		if info.IPRaw == "" {
 			host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -219,29 +250,62 @@ func (s *server) inspect(r *http.Request) requestInfo {
 		}
 	}
 
+	// Canonicalise once, here, so every downstream comparison, cache key and
+	// outbound query sees the same form of the address.
 	if addr, err := netip.ParseAddr(info.IPRaw); err == nil {
-		info.IP = addr
+		info.IP = canonicalIP(addr)
+		info.IPRaw = info.IP.String()
 	}
 	return info
 }
 
-// targetIP returns the IP to look up, which is the requester's IP unless
-// overridden by the path wildcard `/ip/{addr}` or the `?ip=<addr>` query.
-// The third return value flags whether the page is a third-party lookup
-// (so the HTML view can hide CF-Colo/Ray which are about the requester).
-func (s *server) targetIP(r *http.Request, info requestInfo) (netip.Addr, string, bool) {
+// lookupError is a bad-request condition from a caller-supplied address.
+type lookupError struct {
+	status int
+	msg    string
+}
+
+func (e *lookupError) Error() string { return e.msg }
+
+var errRateLimited = &lookupError{status: http.StatusTooManyRequests,
+	msg: "too many third-party lookups; slow down"}
+
+// targetIP returns the address to look up, which is the requester's own
+// unless overridden by the path wildcard `/ip/{addr}` or the `?ip=<addr>`
+// query. The third return value flags whether this is a third-party lookup
+// (so the HTML view can hide CF-Colo/Ray, which are about the requester).
+//
+// A malformed or unroutable override is an error rather than a silent
+// fallback: quietly answering with the caller's own address when they asked
+// about a different one is the kind of thing that survives into a script and
+// produces confidently wrong data.
+func (s *server) targetIP(r *http.Request, info requestInfo) (netip.Addr, string, bool, error) {
 	override := strings.TrimSpace(r.PathValue("addr"))
 	if override == "" {
 		override = strings.TrimSpace(r.URL.Query().Get("ip"))
 	}
 	if override == "" {
-		return info.IP, info.IPRaw, false
+		return info.IP, info.IPRaw, false, nil
 	}
 	addr, err := netip.ParseAddr(override)
 	if err != nil {
-		return info.IP, info.IPRaw, false
+		return netip.Addr{}, "", false, &lookupError{
+			status: http.StatusBadRequest,
+			msg:    "not an IP address: " + truncate(override, 64),
+		}
 	}
-	return addr, override, addr != info.IP
+	addr = canonicalIP(addr)
+	if !isRoutable(addr) {
+		return netip.Addr{}, "", false, &lookupError{
+			status: http.StatusBadRequest,
+			msg:    addr.String() + " is not a globally routable address",
+		}
+	}
+	isLookup := addr != info.IP
+	if isLookup && !s.lookupLimit.Allow(limiterKey(info.IP)) {
+		return netip.Addr{}, "", false, errRateLimited
+	}
+	return addr, addr.String(), isLookup, nil
 }
 
 // ---------- Sec-CH-UA parsing ----------
@@ -405,33 +469,75 @@ type dataset struct {
 	DBLoaded       string     `json:"db_loaded,omitempty" yaml:"db_loaded,omitempty"`
 	IsLookup       bool       `json:"-" yaml:"-"`
 	ReqIP          string     `json:"-" yaml:"-"`
+
+	// CountrySource names where Country came from: "cf" (CF-IPCountry, and
+	// therefore specific to the path this request took), "rir" (the RIR
+	// registration for the announced prefix), or "relay" (the VPN
+	// operator's own record). The IPv4 and IPv6 answers for one client
+	// routinely disagree, and without this the disagreement is invisible.
+	CountrySource string `json:"country_source,omitempty" yaml:"country_source,omitempty"`
+
+	// PoP identifies the VPN exit this address belongs to, when a provider
+	// feed names one. This is what reverse DNS used to supply — and what an
+	// IPv6 arrival usually can't get, because most relay v6 addresses have
+	// no PTR record. PoPV4/PoPV6 are the relay's own endpoints in each
+	// family, which is the closest thing to a cross-family answer a single
+	// hostname can give.
+	PoP         string `json:"pop,omitempty" yaml:"pop,omitempty"`
+	PoPCity     string `json:"pop_city,omitempty" yaml:"pop_city,omitempty"`
+	PoPCountry  string `json:"pop_country,omitempty" yaml:"pop_country,omitempty"`
+	PoPHost     string `json:"pop_host,omitempty" yaml:"pop_host,omitempty"`
+	PoPV4       string `json:"pop_v4,omitempty" yaml:"pop_v4,omitempty"`
+	PoPV6       string `json:"pop_v6,omitempty" yaml:"pop_v6,omitempty"`
+	PoPProvider string `json:"pop_provider,omitempty" yaml:"pop_provider,omitempty"`
 }
 
-func (s *server) gather(r *http.Request) dataset {
+// OtherFamily returns the relay endpoint in the family this request did not
+// arrive on, if the feed published one. Exported because the HTML templates
+// call it.
+func (d dataset) OtherFamily() string {
+	if d.Version == "v6" {
+		return d.PoPV4
+	}
+	return d.PoPV6
+}
+
+func (s *server) gather(r *http.Request) (dataset, error) {
 	info := s.inspect(r)
-	target, targetRaw, isLookup := s.targetIP(r, info)
+	target, targetRaw, isLookup, err := s.targetIP(r, info)
+	if err != nil {
+		return dataset{}, err
+	}
 	asn := s.asn.Lookup(r.Context(), target)
 	verdict := s.vpn.Check(target, asn)
 	reverse := lookupReverse(r.Context(), target)
 	verdict = s.vpn.Augment(r.Context(), verdict, target, asn, reverse, s.whois)
 
 	country := info.Country
+	countrySource := "cf"
 	if isLookup || country == "" {
-		// CF-IPCountry is about the requester, not the target. Use RIR
-		// country as a fallback for either case.
-		if asn.Country != "" {
-			country = asn.Country
-		}
+		// CF-IPCountry describes the requester, not the target, and is a
+		// property of the path this request took. Fall back to the RIR
+		// registration for either case.
+		country, countrySource = asn.Country, "rir"
+	}
+	// The operator's own record beats both: it says where the exit actually
+	// is, rather than where a geo database believes the address is.
+	if verdict.Relay != nil && verdict.Relay.Country != "" {
+		country, countrySource = strings.ToUpper(verdict.Relay.Country), "relay"
+	}
+	if country == "" {
+		countrySource = ""
 	}
 
 	hints := parseClientHints(r)
 	ua := parseUA(info.UA, hints)
-	s.recordUA(info.UA, ua, hints, targetRaw, asn.ASN)
+	s.recordUA(info.UA, ua, hints, info.IPRaw, asn.ASN)
 
 	colo := cfColo(info.CFRay)
 	coloCityName, coloCC := coloLocation(colo)
 
-	return dataset{
+	d := dataset{
 		IP:             targetRaw,
 		Version:        ipVersion(target),
 		Country:        country,
@@ -463,7 +569,34 @@ func (s *server) gather(r *http.Request) dataset {
 		DBLoaded:       s.vpnLoadedAt(),
 		IsLookup:       isLookup,
 		ReqIP:          info.IPRaw,
+		CountrySource:  countrySource,
 	}
+	if rel := verdict.Relay; rel != nil {
+		d.PoP = rel.Hostname
+		d.PoPCity = rel.City
+		d.PoPCountry = strings.ToUpper(rel.Country)
+		d.PoPHost = rel.Host
+		d.PoPV4 = rel.V4
+		d.PoPV6 = rel.V6
+		d.PoPProvider = rel.Provider
+	}
+	return d, nil
+}
+
+// data runs gather and writes a proper error response if the caller asked
+// about something we won't look up.
+func (s *server) data(w http.ResponseWriter, r *http.Request) (dataset, bool) {
+	d, err := s.gather(r)
+	if err != nil {
+		var le *lookupError
+		if errors.As(err, &le) {
+			http.Error(w, le.msg, le.status)
+			return dataset{}, false
+		}
+		http.Error(w, "lookup failed", http.StatusInternalServerError)
+		return dataset{}, false
+	}
+	return d, true
 }
 
 // recordUA emits a deduped journal line whenever we see a UA we couldn't
@@ -488,7 +621,10 @@ func (s *server) recordUA(rawUA string, ua uaInfo, hints clientHints, ip string,
 }
 
 func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	noStore(w)
 
 	if !wantsHTML(r) {
@@ -519,7 +655,10 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleJSON(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	switch strings.ToLower(r.URL.Query().Get("format")) {
 	case "yaml", "yml":
 		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
@@ -540,7 +679,10 @@ func (s *server) handleJSON(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleCountry(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	body := struct {
 		IP      string `json:"ip"`
 		Country string `json:"country"`
@@ -560,12 +702,18 @@ func (s *server) handleCountry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleVPN(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, d.VPN)
 }
 
 func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	noStore(w)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	scheme := r.Header.Get("X-Forwarded-Proto")
@@ -580,6 +728,7 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "fl=%s\n", d.Ray)
 	fmt.Fprintf(w, "h=%s\n", r.Host)
 	fmt.Fprintf(w, "ip=%s\n", d.IP)
+	fmt.Fprintf(w, "version=%s\n", d.Version)
 	fmt.Fprintf(w, "ts=%.3f\n", float64(time.Now().UnixMilli())/1000.0)
 	fmt.Fprintf(w, "visit_scheme=%s\n", scheme)
 	fmt.Fprintf(w, "uag=%s\n", d.UA)
@@ -589,6 +738,9 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "colo_country=%s\n", d.ColoCountry)
 	}
 	fmt.Fprintf(w, "country=%s\n", d.Country)
+	if d.CountrySource != "" {
+		fmt.Fprintf(w, "country_source=%s\n", d.CountrySource)
+	}
 	fmt.Fprintf(w, "asn=AS%d\n", d.ASN)
 	fmt.Fprintf(w, "asorg=%s\n", d.ASOrg)
 	if d.Prefix != "" {
@@ -603,8 +755,27 @@ func (s *server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	if d.Reverse != "" {
 		fmt.Fprintf(w, "reverse=%s\n", d.Reverse)
 	}
+	if d.PoP != "" {
+		fmt.Fprintf(w, "pop=%s\n", d.PoP)
+	}
+	if d.PoPCity != "" {
+		fmt.Fprintf(w, "pop_city=%s\n", d.PoPCity)
+	}
+	if d.PoPCountry != "" {
+		fmt.Fprintf(w, "pop_country=%s\n", d.PoPCountry)
+	}
+	if d.PoPV4 != "" {
+		fmt.Fprintf(w, "pop_v4=%s\n", d.PoPV4)
+	}
+	if d.PoPV6 != "" {
+		fmt.Fprintf(w, "pop_v6=%s\n", d.PoPV6)
+	}
 	fmt.Fprintf(w, "via=%s\n", d.Via)
 	fmt.Fprintf(w, "vpn=%s\n", onOff(d.VPN.VPN))
+	fmt.Fprintf(w, "vpn_db=%s\n", readyWord(d.VPN.Ready))
+	if d.VPN.Hosting {
+		fmt.Fprintf(w, "hosting=on\n")
+	}
 	if d.VPN.Tor {
 		fmt.Fprintf(w, "tor=on\n")
 	}
@@ -638,12 +809,19 @@ func (s *server) handleHeaders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	noStore(w)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "ip:        %s\n", d.IP)
 	fmt.Fprintf(w, "version:   %s\n", d.Version)
-	fmt.Fprintf(w, "country:   %s\n", emptyDash(d.Country))
+	if d.CountrySource != "" {
+		fmt.Fprintf(w, "country:   %s (%s)\n", emptyDash(d.Country), d.CountrySource)
+	} else {
+		fmt.Fprintf(w, "country:   %s\n", emptyDash(d.Country))
+	}
 	fmt.Fprintf(w, "asn:       AS%d\n", d.ASN)
 	fmt.Fprintf(w, "asorg:     %s\n", emptyDash(d.ASOrg))
 	if d.Prefix != "" {
@@ -656,6 +834,23 @@ func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "allocated: %s\n", d.Allocated)
 	}
 	fmt.Fprintf(w, "reverse:   %s\n", emptyDash(d.Reverse))
+	if d.PoP != "" || d.PoPCity != "" {
+		loc := d.PoPCity
+		if d.PoPCountry != "" {
+			if loc != "" {
+				loc += ", " + d.PoPCountry
+			} else {
+				loc = d.PoPCountry
+			}
+		}
+		fmt.Fprintf(w, "pop:       %s\n", strings.TrimSpace(d.PoP+" ("+loc+")"))
+		if d.PoPV4 != "" {
+			fmt.Fprintf(w, "pop_v4:    %s\n", d.PoPV4)
+		}
+		if d.PoPV6 != "" {
+			fmt.Fprintf(w, "pop_v6:    %s\n", d.PoPV6)
+		}
+	}
 	fmt.Fprintf(w, "ua:        %s\n", d.UA)
 	if d.UAPretty != "" {
 		fmt.Fprintf(w, "ua_pretty: %s\n", d.UAPretty)
@@ -690,6 +885,12 @@ func (s *server) handleAll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fmt.Fprintf(w, "vpn:       %t\n", d.VPN.VPN)
+	if d.VPN.Hosting {
+		fmt.Fprintf(w, "hosting:   true\n")
+	}
+	if !d.VPN.Ready {
+		fmt.Fprintf(w, "vpn_db:    not loaded — verdict is not authoritative\n")
+	}
 	if d.VPN.Provider != "" {
 		fmt.Fprintf(w, "provider:  %s\n", d.VPN.Provider)
 	}
@@ -705,10 +906,21 @@ func (s *server) handleUA(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleReverse(w http.ResponseWriter, r *http.Request) {
-	d := s.gather(r)
+	d, ok := s.data(w, r)
+	if !ok {
+		return
+	}
 	noStore(w)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintln(w, emptyDash(d.Reverse))
+}
+
+// readyWord renders the detection-database state for trace output.
+func readyWord(ready bool) string {
+	if ready {
+		return "loaded"
+	}
+	return "unavailable"
 }
 
 // onOff returns "on" / "off" for boolean trace fields.
@@ -726,15 +938,20 @@ func writeYAML(w http.ResponseWriter, d dataset) {
 		if v == "" {
 			return
 		}
-		// Quote if value contains characters YAML would interpret.
-		if strings.ContainsAny(v, ":#@\"'\n") || strings.HasPrefix(v, " ") {
-			v = `"` + strings.ReplaceAll(v, `"`, `\"`) + `"`
+		// Quote anything YAML might reinterpret. A double-quoted YAML
+		// scalar uses the same escapes as JSON, so strconv.Quote produces a
+		// valid one — and unlike the previous hand-rolled version it also
+		// handles backslashes and control characters, which arrive via
+		// User-Agent and PTR strings we don't control.
+		if strings.ContainsAny(v, ":#@\"'\n\\{}[]&*!|>%`,") || strings.HasPrefix(v, " ") || strings.HasSuffix(v, " ") {
+			v = strconv.Quote(v)
 		}
 		fmt.Fprintf(w, "%s: %s\n", k, v)
 	}
 	emit("ip", d.IP)
 	emit("version", d.Version)
 	emit("country", d.Country)
+	emit("country_source", d.CountrySource)
 	if d.ASN != 0 {
 		fmt.Fprintf(w, "asn: %d\n", d.ASN)
 	}
@@ -756,8 +973,19 @@ func writeYAML(w http.ResponseWriter, d dataset) {
 	emit("colo", d.Colo)
 	emit("colo_city", d.ColoCity)
 	emit("colo_country", d.ColoCountry)
+	emit("pop", d.PoP)
+	emit("pop_city", d.PoPCity)
+	emit("pop_country", d.PoPCountry)
+	emit("pop_host", d.PoPHost)
+	emit("pop_v4", d.PoPV4)
+	emit("pop_v6", d.PoPV6)
+	emit("pop_provider", d.PoPProvider)
 	fmt.Fprintf(w, "vpn:\n")
 	fmt.Fprintf(w, "  vpn: %t\n", d.VPN.VPN)
+	fmt.Fprintf(w, "  ready: %t\n", d.VPN.Ready)
+	if d.VPN.Hosting {
+		fmt.Fprintf(w, "  hosting: true\n")
+	}
 	if d.VPN.Tor {
 		fmt.Fprintf(w, "  tor: true\n")
 	}
@@ -838,16 +1066,26 @@ func classifyVerdict(v vpnVerdict) verdictView {
 	switch {
 	case v.Tor:
 		return verdictView{Tone: "warn", Stamp: "Tor", What: "Tor exit relay", Src: "tor exit list"}
-	case v.Provider == "cloudflare-warp":
-		return verdictView{Tone: "warn", Stamp: "WARP", What: "Cloudflare WARP / 1.1.1.1", Src: "AS13335 egress"}
 	case v.PrivacyProxy:
 		return verdictView{Tone: "warn", Stamp: "Private Relay", What: "iCloud Private Relay egress", Src: "apple egress cidr"}
 	case v.VPN:
 		name := providerLabel(v.Provider)
 		if name == "" {
-			name = "Hosting / VPN network"
+			name = firstNonEmpty(v.Network, "Hosting / VPN network")
 		}
 		return verdictView{Tone: "bad", Stamp: "VPN", What: name, Src: sourceLabel(v.Source)}
+	case v.Hosting:
+		// A datacenter address, but nothing says a VPN is involved. This
+		// used to render as "VPN", which buried real detections under
+		// ordinary cloud and CDN traffic.
+		return verdictView{Tone: "warn", Stamp: "Hosting",
+			What: firstNonEmpty(v.Network, "Datacenter network"),
+			Src:  sourceLabel(v.Source)}
+	case !v.Ready:
+		// No provider list has loaded. Saying "Clean" here would be a
+		// confident pass we have no basis for.
+		return verdictView{Tone: "warn", Stamp: "Unknown",
+			What: "Detection lists not loaded", Src: "no sources available"}
 	default:
 		return verdictView{Tone: "good", Stamp: "Clean", What: "No flags raised", Src: "all sources clear"}
 	}
@@ -865,8 +1103,6 @@ func providerLabel(k string) string {
 		return "AirVPN"
 	case "icloud-private-relay":
 		return "iCloud Private Relay"
-	case "cloudflare-warp":
-		return "Cloudflare WARP"
 	}
 	return k
 }
@@ -878,6 +1114,8 @@ func sourceLabel(s string) string {
 	case "ip-prefix":
 		return "in published VPN provider's prefix"
 	case "asn":
+		return "matched VPN-rental ASN"
+	case "asn-hosting":
 		return "matched datacenter ASN"
 	case "asn+ip-list":
 		return "matched server IP + datacenter ASN"
@@ -939,6 +1177,16 @@ func cfColo(ray string) string {
 func countryFlag(cc string) string {
 	cc = strings.ToUpper(strings.TrimSpace(cc))
 	if len(cc) != 2 {
+		return ""
+	}
+	// Cloudflare uses "T1" for Tor and "XX" for unknown. Without this guard
+	// the arithmetic below wraps into unrelated code points.
+	for i := 0; i < 2; i++ {
+		if cc[i] < 'A' || cc[i] > 'Z' {
+			return ""
+		}
+	}
+	if cc == "XX" {
 		return ""
 	}
 	r := []rune{0x1F1E6 + rune(cc[0]-'A'), 0x1F1E6 + rune(cc[1]-'A')}
@@ -1010,6 +1258,10 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap lets http.ResponseController reach the underlying writer, so
+// wrapping here doesn't silently disable flushing or hijacking later.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
